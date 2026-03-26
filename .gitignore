@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+.claude/
+.agents/
+
+# Database
+*.db
+*.sqlite3
+
+# Logs
+*.log
+
+# Data files (büyük dosyalar — GitHub 100MB limiti)
+data/processed/*.npy
+data/processed/*.pkl
+data/raw/*.csv
+data/results/*.png
+
+# Saved models (büyük dosyalar)
+src/models/saved_models/*.pth
+src/models/saved_models/*.pkl
+src/rl/saved_agents/*.zip
+
+# OS files
+.DS_Store
+Thumbs.db
+~$*
+
+# Office temp files
+~$*.docx
+~$*.pptx
