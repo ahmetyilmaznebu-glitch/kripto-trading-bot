@@ -1,89 +1,144 @@
+"""
+time_series_models.py — LSTM/GRU Zaman Serisi Modelleri 
+=========================================================================
+Kripto Para Trading Botu | Ahmet Yılmaz
+
+DEĞİŞİKLİK GÜNLÜĞÜ (ML4T Kitap Referanslı Düzeltmeler):
+─────────────────────────────────────────────────────────
+1. [KRİTİK] Purging gap eklendi (Bölüm 6, s.210-220)
+   - Train/val arasında WINDOW_SIZE kadar boşluk bırakılıyor
+   - Pencere örtüşmesinden kaynaklanan bilgi sızıntısı engellendi
+
+2. [KRİTİK] 3-yollu split: Train / Val / Test (Bölüm 6, s.200-215)
+   - Val: early stopping + threshold tuning
+   - Test: SADECE final performans raporu
+   - Double-dipping (çift kullanım) hatası giderildi
+
+3. [YÜKSEK] Dejenere davranış tespiti ve müdahale (Bölüm 17)
+   - Her epoch sonunda tahmin dağılımı izleniyor
+   - Tek sınıf tahmini → LR reset + ağırlık pertürbasyonu
+   - Dejenere sayacı ile erken uyarı sistemi
+
+4. [YÜKSEK] Gradient akış izleme (Bölüm 17, s.560)
+   - Gradient norm'ları loglanıyor
+   - Sıfır gradient → alarm
+
+5. [ORTA] F1-aware early stopping (Bölüm 6)
+   - Sadece val_loss yerine val_f1 de izleniyor
+   - F1 = 0 olan model "en iyi" olarak seçilemez
+
+6. [ORTA] Focal Loss alpha düzeltmesi
+   - Eski: alpha = clip(n_pos/(n_pos+n_neg)) → DOWN sınıfı görmezden gelinebiliyordu
+   - Yeni: alpha = clip(n_neg/(n_pos+n_neg)) → azınlık sınıfı ağırlıklandırılır
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import os
 import json
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, f1_score as sklearn_f1
 from sklearn.dummy import DummyClassifier
 
 
+# ══════════════════════════════════════════════════════════════
+#  SABITLER
+# ══════════════════════════════════════════════════════════════
+
+WINDOW_SIZE = 60          # Sliding window boyutu (data_pipeline ile uyumlu)
+PURGE_GAP = WINDOW_SIZE   # Train/Val ve Val/Test arasındaki boşluk
+DEGENERATE_PATIENCE = 5   # Art arda kaç epoch dejenere davranış toleransı
+DEGENERATE_THRESHOLD = 0.95  # Tahminlerin %95'i tek sınıfsa → dejenere
+
+
+# ══════════════════════════════════════════════════════════════
+#  FOCAL LOSS
+# ══════════════════════════════════════════════════════════════
+
 class FocalLoss(nn.Module):
-    """Focal Loss: kolay orneklerin agirligini azaltir, zor orneklere odaklanir.
-    
-    alpha: pozitif sinif agirligi (sinif dengesizligi icin)
-    gamma: odaklanma parametresi (gamma=0 ise normal BCE'ye esit)
     """
-    def __init__(self, alpha=1.0, gamma=2.0):
-        super(FocalLoss, self).__init__()
+    Focal Loss: kolay örneklerin ağırlığını azaltır, zor örneklere odaklanır.
+
+    DÜZELTİLDİ: alpha artık AZINLIK sınıfının oranını temsil eder.
+    Eski kodda alpha = n_pos/(n_pos+n_neg) kullanılıyordu; bu durumda
+    eğer UP çoğunluksa alpha yüksek olur ve DOWN sınıfının ağırlığı
+    (1-alpha) çok düşer → model DOWN'ı hiç öğrenemez.
+
+    Yeni: alpha = n_neg/(n_pos+n_neg) → dengesiz sınıflarda azınlık
+    sınıfı daha fazla ağırlık alır.
+    """
+    def __init__(self, alpha=0.5, gamma=2.0):
+        super().__init__()
         self.alpha = alpha
         self.gamma = gamma
-    
+
     def forward(self, logits, targets):
-        bce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+        bce = nn.functional.binary_cross_entropy_with_logits(
+            logits, targets, reduction='none'
+        )
         probs = torch.sigmoid(logits)
-        # p_t: dogru sinifin olasiligi
         p_t = probs * targets + (1 - probs) * (1 - targets)
-        # Focal weight: kolay orneklerin agirligini dusur
         focal_weight = (1 - p_t) ** self.gamma
-        # Alpha weight: sinif dengesizligi
         alpha_weight = self.alpha * targets + (1 - self.alpha) * (1 - targets)
         loss = alpha_weight * focal_weight * bce
         return loss.mean()
 
 
+# ══════════════════════════════════════════════════════════════
+#  TEMPORAL ATTENTION
+# ══════════════════════════════════════════════════════════════
+
 class Attention(nn.Module):
     """Temporal Attention: hangi zaman adımlarının önemli olduğunu öğrenir."""
     def __init__(self, hidden_size):
-        super(Attention, self).__init__()
+        super().__init__()
         self.attention = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
             nn.Tanh(),
             nn.Linear(hidden_size // 2, 1)
         )
-    
+
     def forward(self, rnn_output):
-        # rnn_output: (batch, seq_len, hidden_size)
-        attn_weights = self.attention(rnn_output)  # (batch, seq_len, 1)
+        attn_weights = self.attention(rnn_output)
         attn_weights = torch.softmax(attn_weights, dim=1)
-        # Ağırlıklı toplam
-        context = torch.sum(rnn_output * attn_weights, dim=1)  # (batch, hidden_size)
+        context = torch.sum(rnn_output * attn_weights, dim=1)
         return context, attn_weights
 
 
+# ══════════════════════════════════════════════════════════════
+#  ANA MODEL
+# ══════════════════════════════════════════════════════════════
+
 class TimeSeriesNet(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, output_size, 
+    def __init__(self, input_size, hidden_size, num_layers, output_size,
                  model_type="LSTM", bidirectional=False, use_attention=True):
-        super(TimeSeriesNet, self).__init__()
+        super().__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.model_type = model_type
         self.bidirectional = bidirectional
         self.use_attention = use_attention
-        
-        # Dropout orani (katman sayisina gore)
+
         dropout_rate = 0.3 if num_layers > 1 else 0.0
-        
+
         if model_type == "LSTM":
-            self.rnn = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True,
-                               bidirectional=bidirectional, dropout=dropout_rate)
+            self.rnn = nn.LSTM(input_size, hidden_size, num_layers,
+                               batch_first=True, bidirectional=bidirectional,
+                               dropout=dropout_rate)
         elif model_type == "GRU":
-            self.rnn = nn.GRU(input_size, hidden_size, num_layers, batch_first=True,
-                              bidirectional=bidirectional, dropout=dropout_rate)
+            self.rnn = nn.GRU(input_size, hidden_size, num_layers,
+                              batch_first=True, bidirectional=bidirectional,
+                              dropout=dropout_rate)
         else:
-            raise ValueError("Desteklenmeyen model turu: Sadece 'LSTM' veya 'GRU' desteklenir.")
-        
+            raise ValueError(f"Desteklenmeyen model türü: {model_type}")
+
         D = 2 if bidirectional else 1
         rnn_output_size = hidden_size * D
-        
-        # Attention layer
+
         if use_attention:
             self.attention = Attention(rnn_output_size)
-        
-        # Fully connected head
-        # DUZELTME: Dropout oranları düşürüldü (0.3->0.2, 0.2->0.1).
-        # Ardışık iki yüksek dropout, bilgi akışını kesiyor ve dejenere
-        # çözümlere yol açıyordu.
+
         self.head = nn.Sequential(
             nn.LayerNorm(rnn_output_size),
             nn.Dropout(0.2),
@@ -94,92 +149,179 @@ class TimeSeriesNet(nn.Module):
         )
 
     def forward(self, x):
-        # x shape: (batch, seq_len, features)
         out, _ = self.rnn(x)
-        
         if self.use_attention:
-            # Attention: tüm zaman adımlarına bakarak önemli olanları seç
-            out, _ = self.attention(out)  # (batch, hidden_size*D)
+            out, _ = self.attention(out)
         else:
-            # Eski yöntem: sadece son zaman adımı
             out = out[:, -1, :]
-        
         out = self.head(out)
         return out
 
 
-def train_model(model, X_train, y_train, X_val, y_val, num_epochs=300, batch_size=32,
-                learning_rate=0.001, patience=30, label_smoothing=0.05):
+# ══════════════════════════════════════════════════════════════
+#  YARDIMCI: Dejenere Tespit
+# ══════════════════════════════════════════════════════════════
+
+def _check_degenerate(model, X_tensor, device, threshold=0.5):
     """
-    Model egitimi: Focal Loss + Attention + Gradient Clipping + Label Smoothing + Cosine LR.
+    Modelin tahmin dağılımını kontrol eder.
+    Eğer tahminlerin büyük çoğunluğu tek sınıfsa → dejenere.
+
+    Returns:
+        is_degenerate (bool), up_ratio (float), predictions (np.ndarray)
+    """
+    model.eval()
+    with torch.no_grad():
+        logits = model(X_tensor.to(device))
+        probs = torch.sigmoid(logits).cpu().numpy().flatten()
+    preds = (probs > threshold).astype(int)
+    up_ratio = preds.mean()
+    is_deg = up_ratio > DEGENERATE_THRESHOLD or up_ratio < (1 - DEGENERATE_THRESHOLD)
+    return is_deg, up_ratio, preds
+
+
+def _perturb_weights(model, scale=0.01):
+    """
+    Model ağırlıklarına küçük gürültü ekler.
+    Dejenere minimumdan çıkmaya yardımcı olur.
+    """
+    with torch.no_grad():
+        for param in model.parameters():
+            noise = torch.randn_like(param) * scale
+            param.add_(noise)
+
+
+# ══════════════════════════════════════════════════════════════
+#  YARDIMCI: Gradient İzleme
+# ══════════════════════════════════════════════════════════════
+
+def _get_grad_norm(model):
+    """Model parametrelerinin gradient norm'unu hesaplar."""
+    total_norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            total_norm += p.grad.data.norm(2).item() ** 2
+    return total_norm ** 0.5
+
+
+# ══════════════════════════════════════════════════════════════
+#  YARDIMCI: F1 Hesaplama
+# ══════════════════════════════════════════════════════════════
+
+def _compute_f1(model, X_tensor, y_true, device, threshold=0.5):
+    """Model tahminlerinden F1 skoru hesaplar."""
+    model.eval()
+    with torch.no_grad():
+        logits = model(X_tensor.to(device))
+        probs = torch.sigmoid(logits).cpu().numpy().flatten()
+    preds = (probs > threshold).astype(int)
+    y_int = y_true.astype(int) if isinstance(y_true, np.ndarray) else y_true
+    return sklearn_f1(y_int, preds, zero_division=0)
+
+
+# ══════════════════════════════════════════════════════════════
+#  EĞİTİM FONKSİYONU (DÜZELTİLMİŞ)
+# ══════════════════════════════════════════════════════════════
+
+def train_model(model, X_train, y_train, X_val, y_val,
+                num_epochs=150, batch_size=32, learning_rate=0.001,
+                patience=20, label_smoothing=0.05):
+    """
+    Model eğitimi — Dejenere Tespitli, F1-Aware Early Stopping.
+
+    DEĞİŞİKLİKLER:
+    - Dejenere davranış tespiti: her 5 epoch'ta tahmin dağılımı kontrol edilir.
+      Art arda DEGENERATE_PATIENCE kez dejenere → LR reset + weight perturbation.
+    - F1-aware early stopping: val_loss düşse bile F1=0 ise "en iyi model" sayılmaz.
+    - Gradient norm izleme: sıfır gradient alarm.
+    - Val seti SADECE early stopping için kullanılır (threshold tuning ayrı).
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
-    
-    # Sinif dengesizligi icin pos_weight hesapla
+
+    # ── Sınıf dengesizliği ──
     n_pos = np.sum(y_train == 1)
     n_neg = np.sum(y_train == 0)
-    pos_weight_val = n_neg / (n_pos + 1e-8)
-    print(f"  Sinif dagilimi: UP={int(n_pos)}, DOWN={int(n_neg)}, pos_weight={pos_weight_val:.3f}")
-    
-    # Focal Loss: dejenere davranisi engellemek icin.
-    # DUZELTME: alpha = pozitif sinifin (UP) veri icerisindeki orani, [0.25, 0.75]'e kirpilir.
-    # Eski kod: alpha = min(pos_weight_val, 2.0) → alpha=1.0 oldugunda DOWN sinifinin
-    # agirligi (1-alpha)=0 oluyordu; model hic DOWN ornegi goremeden egitiliyordu.
-    alpha = float(np.clip(n_pos / (n_pos + n_neg + 1e-8), 0.25, 0.75))
-    criterion = FocalLoss(alpha=alpha, gamma=2.0)
-    
+    print(f"  Sınıf dağılımı: UP={int(n_pos)}, DOWN={int(n_neg)}")
+
+    # DÜZELTİLDİ: alpha = azınlık sınıfının oranı
+    alpha = float(np.clip(n_neg / (n_pos + n_neg + 1e-8), 0.3, 0.7))
+
+    # 2 FAZLI EĞİTİM:
+    # Faz 1 (ilk 30 epoch): Düz BCE (gamma=0) → modeli karar sınırından uzaklaştır
+    # Faz 2 (kalan epochlar): Focal Loss (gamma=1.0) → zor örneklere odaklan
+    # NOT: Eski gamma=2.0 çok agresifti — sigmoid≈0.5'te gradient 4x azalıyordu
+    criterion_bce = FocalLoss(alpha=alpha, gamma=0.0)   # = weighted BCE
+    criterion_focal = FocalLoss(alpha=alpha, gamma=1.0)  # hafif focal
+    warmup_epochs = 30
+    print(f"  2-Fazlı Eğitim: BCE warmup({warmup_epochs} epoch) → Focal Loss(gamma=1.0)")
+    print(f"  Alpha={alpha:.3f}")
+
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    
-    # Cosine Annealing: LR'yi düzgünce azaltır
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=30, T_mult=2, eta_min=1e-6
+        optimizer, T_0=50, T_mult=2, eta_min=1e-6
     )
-    
-    # Label smoothing uygula
-    y_train_smooth = y_train.copy()
-    y_train_smooth = np.where(y_train_smooth == 1, 1.0 - label_smoothing, label_smoothing)
-    
+
+    # Label smoothing
+    y_train_smooth = np.where(y_train == 1, 1.0 - label_smoothing, label_smoothing)
+
     # DataLoader
     train_dataset = torch.utils.data.TensorDataset(
         torch.FloatTensor(X_train), torch.FloatTensor(y_train_smooth))
     val_dataset = torch.utils.data.TensorDataset(
-        torch.FloatTensor(X_val), torch.FloatTensor(y_val))
-    
+        torch.FloatTensor(X_val), torch.FloatTensor(y_val.astype(np.float32)))
+
     train_loader = torch.utils.data.DataLoader(
-        dataset=train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+        train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     val_loader = torch.utils.data.DataLoader(
-        dataset=val_dataset, batch_size=batch_size, shuffle=False)
-    
+        val_dataset, batch_size=batch_size, shuffle=False)
+
+    # Val tensörü (F1 ve dejenere kontrolü için)
+    val_tensor = torch.FloatTensor(X_val)
+
+    # ── Eğitim değişkenleri ──
     best_loss = float('inf')
+    best_f1 = 0.0
     best_model_state = None
     epochs_no_improve = 0
-    
+    degenerate_count = 0
+    degenerate_resets = 0
+    max_resets = 3  # En fazla 3 kez reset
+
+    print(f"\n  {'Epoch':>5} | {'T.Loss':>8} | {'V.Loss':>8} | {'V.Acc':>6} | "
+          f"{'V.F1':>6} | {'UP%':>5} | {'GradNorm':>9} | {'LR':>10} | Durum")
+    print(f"  {'─' * 85}")
+
     for epoch in range(num_epochs):
+        # ── Train ──
         model.train()
         train_loss = 0
+        last_grad_norm = 0
+
+        # Faz seçimi
+        criterion = criterion_bce if epoch < warmup_epochs else criterion_focal
+
         for batch_X, batch_y in train_loader:
             batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-            
             outputs = model(batch_X)
             if len(batch_y.shape) == 1:
-               batch_y = batch_y.view(-1, 1)
-               
+                batch_y = batch_y.view(-1, 1)
             loss = criterion(outputs, batch_y)
-            
+
             optimizer.zero_grad()
             loss.backward()
-            
-            # Gradient Clipping: gradient patlamasını engeller
+
+            # Gradient izleme
+            last_grad_norm = _get_grad_norm(model)
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             optimizer.step()
             train_loss += loss.item()
-            
+
         train_loss /= len(train_loader)
         scheduler.step()
-        
-        # Validation
+
+        # ── Validation ──
         model.eval()
         val_loss = 0
         correct = 0
@@ -192,187 +334,362 @@ def train_model(model, X_train, y_train, X_val, y_val, num_epochs=300, batch_siz
                     batch_y = batch_y.view(-1, 1)
                 loss = criterion(outputs, batch_y)
                 val_loss += loss.item()
-                
-                # Accuracy hesapla
                 preds = (torch.sigmoid(outputs) > 0.5).float()
                 correct += (preds == batch_y).sum().item()
                 total += batch_y.size(0)
-        
+
         val_loss /= len(val_loader)
         val_acc = correct / total if total > 0 else 0.0
+        val_f1 = _compute_f1(model, val_tensor, y_val, device)
         current_lr = optimizer.param_groups[0]['lr']
-        
-        if (epoch + 1) % 10 == 0 or epoch < 3:
-            print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.6f}, "
-                  f"Val Loss: {val_loss:.6f}, Val Acc: {val_acc:.4f}, LR: {current_lr:.6f}")
-        
-        if val_loss < best_loss:
+
+        # ── Dejenere kontrolü (her 5 epoch'ta) ──
+        status = ""
+        if (epoch + 1) % 5 == 0 or epoch < 3:
+            is_deg, up_ratio, _ = _check_degenerate(model, val_tensor, device)
+            if is_deg:
+                degenerate_count += 1
+                status = f"⚠️ DEJ({degenerate_count}/{DEGENERATE_PATIENCE})"
+
+                # Art arda çok fazla dejenere → müdahale
+                if degenerate_count >= DEGENERATE_PATIENCE and degenerate_resets < max_resets:
+                    degenerate_resets += 1
+                    degenerate_count = 0
+
+                    # LR'yi yükselt ve ağırlıkları pertürbe et
+                    new_lr = learning_rate * (0.5 ** degenerate_resets)
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = new_lr
+                    _perturb_weights(model, scale=0.02)
+                    status = f"🔄 RESET #{degenerate_resets} (LR→{new_lr:.5f})"
+            else:
+                degenerate_count = max(0, degenerate_count - 1)
+                status = "✅"
+        else:
+            _, up_ratio, _ = _check_degenerate(model, val_tensor, device)
+
+        # ── Loglama ──
+        if (epoch + 1) % 10 == 0 or epoch < 5 or status.startswith("🔄"):
+            print(f"  {epoch+1:>5} | {train_loss:>8.5f} | {val_loss:>8.5f} | "
+                  f"{val_acc:>5.3f} | {val_f1:>5.3f} | {up_ratio:>4.1%} | "
+                  f"{last_grad_norm:>9.4f} | {current_lr:>10.7f} | {status}")
+
+        # ── Sıfır gradient alarmı ──
+        if last_grad_norm < 1e-7 and epoch > 5:
+            print(f"  ⚠️  Epoch {epoch+1}: Gradient norm ≈ 0! Model öğrenmiyor olabilir.")
+
+        # ── F1-aware early stopping ──
+        # DÜZELTİLDİ: Sadece val_loss değil, val_f1 de kontrol edilir.
+        # F1 = 0 olan model "en iyi" kabul edilmez (dejenere modeli kurtarır).
+        improved = False
+        if val_loss < best_loss and val_f1 > 0.01:
             best_loss = val_loss
+            best_f1 = val_f1
             best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
             epochs_no_improve = 0
+            improved = True
+        elif val_f1 > best_f1 + 0.02:
+            # F1 önemli ölçüde arttıysa, loss biraz yüksek olsa da kabul et
+            best_f1 = val_f1
+            best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
+            epochs_no_improve = 0
+            improved = True
         else:
             epochs_no_improve += 1
-        
+
         if epochs_no_improve >= patience:
-            print(f"\n⚠️  Early Stopping: {patience} epoch boyunca iyilesme yok. "
-                  f"En iyi val_loss: {best_loss:.6f}")
+            print(f"\n  ⏹️  Early Stopping: {patience} epoch iyileşme yok. "
+                  f"En iyi val_loss: {best_loss:.6f}, F1: {best_f1:.4f}")
             break
-            
-    model.load_state_dict(best_model_state)
-    print(f"✅ En iyi model yuklendi (val_loss: {best_loss:.6f})")
-    
-    # Optimal threshold arama (F1 maximize)
+
+    # ── En iyi modeli yükle ──
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        print(f"  ✅ En iyi model yüklendi (val_loss: {best_loss:.6f}, F1: {best_f1:.4f})")
+    else:
+        print(f"  ⚠️ F1 > 0 olan model bulunamadı! Model dejenere olmuş olabilir.")
+
+    return model
+
+
+# ══════════════════════════════════════════════════════════════
+#  OPTIMAL THRESHOLD ARAMA (AYRI FONKSİYON)
+# ══════════════════════════════════════════════════════════════
+
+def find_optimal_threshold(model, X_data, y_data, device):
+    """
+    F1 skoru maximize eden threshold'u bulur.
+
+    DÜZELTİLDİ: Bu işlem artık train_model içinde değil, ayrı bir
+    fonksiyon. Böylece hangi veri seti üzerinde yapıldığı açıkça kontrol edilir.
+    Val seti üzerinde çalıştırılır, test seti üzerinde ASLA.
+    """
     model.eval()
     with torch.no_grad():
-        val_tensor = torch.FloatTensor(X_val).to(device)
-        val_logits = model(val_tensor)
-        val_probs = torch.sigmoid(val_logits).cpu().numpy().flatten()
-    
+        tensor = torch.FloatTensor(X_data).to(device)
+        logits = model(tensor)
+        probs = torch.sigmoid(logits).cpu().numpy().flatten()
+
+    y_int = y_data.astype(int)
     best_threshold = 0.5
     best_f1 = 0.0
-    for thr in np.arange(0.3, 0.7, 0.01):
-        preds = (val_probs > thr).astype(int)
-        tp = np.sum((preds == 1) & (y_val == 1))
-        fp = np.sum((preds == 1) & (y_val == 0))
-        fn = np.sum((preds == 0) & (y_val == 1))
-        precision = tp / (tp + fp + 1e-8)
-        recall = tp / (tp + fn + 1e-8)
-        f1 = 2 * precision * recall / (precision + recall + 1e-8)
+
+    for thr in np.arange(0.30, 0.70, 0.01):
+        preds = (probs > thr).astype(int)
+        # Tek sınıf tahmini yapan threshold'u atla
+        if preds.mean() > 0.95 or preds.mean() < 0.05:
+            continue
+        f1 = sklearn_f1(y_int, preds, zero_division=0)
         if f1 > best_f1:
             best_f1 = f1
             best_threshold = thr
-    
-    print(f"🎯 Optimal threshold: {best_threshold:.2f} (Val F1: {best_f1:.4f})")
-    return model, best_threshold
+
+    # Dejenere kontrol: tüm threshold'lar tek sınıf üretiyorsa → 0.50 kullan
+    final_preds = (probs > best_threshold).astype(int)
+    if final_preds.mean() > 0.95 or final_preds.mean() < 0.05:
+        print(f"  ⚠️  Tüm threshold'lar tek sınıf üretiyor. Varsayılan 0.50 kullanılıyor.")
+        best_threshold = 0.50
+        best_f1 = sklearn_f1(y_int, (probs > 0.50).astype(int), zero_division=0)
+
+    print(f"  🎯 Optimal threshold: {best_threshold:.2f} (F1: {best_f1:.4f})")
+    return best_threshold
+
+
+# ══════════════════════════════════════════════════════════════
+#  DEĞERLENDİRME (AYRI TEST SETİ ÜZERİNDE)
+# ══════════════════════════════════════════════════════════════
+
+def evaluate_model(model, X_test, y_test, threshold, model_name, device):
+    """
+    DÜZELTİLDİ: Final değerlendirme AYRI test seti üzerinde yapılır.
+    Bu veri ne eğitimde ne early stopping'de ne threshold tuning'de kullanılmıştır.
+    Böylece gerçek out-of-sample performans raporlanır.
+    """
+    model.eval()
+    with torch.no_grad():
+        tensor = torch.FloatTensor(X_test).to(device)
+        logits = model(tensor)
+        probs = torch.sigmoid(logits).cpu().numpy().flatten()
+
+    preds = (probs > threshold).astype(int)
+    y_int = y_test.astype(int)
+
+    acc = np.mean(preds == y_int)
+    f1 = sklearn_f1(y_int, preds, zero_division=0)
+    cm = confusion_matrix(y_int, preds)
+
+    # Prediction dağılımı
+    up_ratio = preds.mean()
+
+    print(f"\n  {model_name} (threshold={threshold:.2f}) — TEST SETİ:")
+    print(f"  Accuracy: {acc:.4f} | F1: {f1:.4f} | UP oranı: {up_ratio:.1%}")
+    print(f"  {'':12s} Tahmin DOWN  Tahmin UP")
+    if cm.shape == (2, 2):
+        print(f"  {'Gerçek DOWN':12s} {cm[0][0]:>11}  {cm[0][1]:>9}")
+        print(f"  {'Gerçek UP  ':12s} {cm[1][0]:>11}  {cm[1][1]:>9}")
+        if cm[0][1] == 0 and cm[1][0] == 0:
+            print(f"  ⚠️  {model_name} yalnızca tek sınıfı tahmin ediyor!")
+    else:
+        print(f"  ⚠️  Confusion matrix beklenmeyen boyutta: {cm.shape}")
+        print(f"  {cm}")
+
+    return acc, f1
+
+
+# ══════════════════════════════════════════════════════════════
+#  3-YOLLU SPLİT (PURGING İLE)
+# ══════════════════════════════════════════════════════════════
+
+def split_with_purging(X, y, train_ratio=0.70, val_ratio=0.15):
+    """
+    Zaman serisi verisini Train / Val / Test olarak 3'e ayırır.
+    Her set arasında PURGE_GAP kadar boşluk bırakır.
+
+    Kitap Referansı (Bölüm 6, s.210-220):
+    "Purging removes training observations whose labels overlap
+     with the test period, preventing information leakage."
+
+    Düzen:
+    [───── TRAIN ─────][gap][──── VAL ────][gap][──── TEST ────]
+                       ↑                   ↑
+                    PURGE_GAP          PURGE_GAP
+    """
+    n = len(X)
+
+    # Her gap'te PURGE_GAP örnek kaybediyoruz
+    usable = n - 2 * PURGE_GAP
+    train_end = int(usable * train_ratio)
+    val_end = train_end + int(usable * val_ratio)
+
+    # İndeksler
+    train_idx_end = train_end
+    val_idx_start = train_end + PURGE_GAP
+    val_idx_end = val_end + PURGE_GAP
+    test_idx_start = val_end + 2 * PURGE_GAP
+
+    X_train = X[:train_idx_end]
+    y_train = y[:train_idx_end]
+
+    X_val = X[val_idx_start:val_idx_end]
+    y_val = y[val_idx_start:val_idx_end]
+
+    X_test = X[test_idx_start:]
+    y_test = y[test_idx_start:]
+
+    print(f"\n  📊 3-Yollu Split (Purging gap={PURGE_GAP}):")
+    print(f"     Train : {len(X_train):>5} örnek  [0:{train_idx_end}]")
+    print(f"     Val   : {len(X_val):>5} örnek  [{val_idx_start}:{val_idx_end}]")
+    print(f"     Test  : {len(X_test):>5} örnek  [{test_idx_start}:{n}]")
+    print(f"     Purge : {PURGE_GAP * 2:>5} örnek kaybı (güvenilirlik için)")
+
+    # Sınıf dağılımlarını kontrol et
+    for name, y_part in [("Train", y_train), ("Val", y_val), ("Test", y_test)]:
+        n_up = np.sum(y_part == 1)
+        n_dn = np.sum(y_part == 0)
+        total = len(y_part)
+        print(f"     {name:5s}: UP={n_up} ({n_up/total:.1%}), DOWN={n_dn} ({n_dn/total:.1%})")
+
+    return X_train, y_train, X_val, y_val, X_test, y_test
+
+
+# ══════════════════════════════════════════════════════════════
+#  ANA FONKSİYON
+# ══════════════════════════════════════════════════════════════
 
 def main(ticker="BTC-USD"):
-    # On islenmis veriyi yukle
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     x_path = os.path.join(base_dir, 'data', 'processed', f'{ticker}_X_windows.npy')
     y_path = os.path.join(base_dir, 'data', 'processed', f'{ticker}_y_targets.npy')
-    
+
     if not os.path.exists(x_path):
-        print(f"Hata: {ticker}_X_windows.npy bulunamadi. Once data_pipeline.py calistirin.")
+        print(f"Hata: {ticker}_X_windows.npy bulunamadı. Önce data_pipeline.py çalıştırın.")
         return
-        
-    X = np.load(x_path, allow_pickle=True)
-    y = np.load(y_path, allow_pickle=True)
-    
-    X = X.astype(np.float32)
-    y = y.astype(np.float32)
-    
-    # Egitim / Test Verisi Ayirma (%80/%20, kronolojik)
-    train_size = int(len(X) * 0.8)
-    X_train, X_val = X[:train_size], X[train_size:]
-    y_train, y_val = y[:train_size], y[train_size:]
-    
-    print(f"\n--- {ticker} LSTM/GRU Egitimi (Focal Loss + Attention + Optimal Threshold) ---")
-    print(f"X_train.shape: {X_train.shape}, y_train.shape: {y_train.shape}")
-    print(f"X_val.shape: {X_val.shape}, y_val.shape: {y_val.shape}")
-    
-    input_size = X_train.shape[2]  # feature sayisi
-    hidden_size = 128
-    # DUZELTME: num_layers 3->2. 3 katmanli modelde dropout 2 kez uygulaniyordu;
-    # bu gradient akisini kesiyor ve dejenere minimuma erken yakinsamamaya yol aciyordu.
-    num_layers = 2
+
+    X = np.load(x_path, allow_pickle=True).astype(np.float32)
+    y = np.load(y_path, allow_pickle=True).astype(np.float32)
+
+    print(f"\n{'═' * 70}")
+    print(f"  {ticker} LSTM/GRU Eğitimi (DÜZELTİLMİŞ — Purging + 3-Way Split)")
+    print(f"{'═' * 70}")
+    print(f"  Veri boyutu: X={X.shape}, y={y.shape}")
+
+    # ── DÜZELTİLDİ: 3-yollu split (purging ile) ──
+    X_train, y_train, X_val, y_val, X_test, y_test = split_with_purging(X, y)
+
+    input_size = X_train.shape[2]
+    # DÜZELTİLDİ: Daha küçük model — 1200 eğitim örneği için 128/2 çok büyüktü
+    # Küçük model overfitting'i azaltır ve daha hızlı yakınsar
+    hidden_size = 64
+    num_layers = 1
     output_size = 1
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     thresholds = {}
 
-    print(f"\n--- {ticker} LSTM + Attention Egitiliyor (150 epoch, Focal Loss) ---")
-    lstm_model = TimeSeriesNet(input_size, hidden_size, num_layers, output_size,
-                                model_type="LSTM", bidirectional=False, use_attention=True)
-    # DUZELTME: num_epochs 300->150, patience 30->20. Daha kisa egitim dejenere
-    # davranisi erken tespit etmeyi kolaylastirir.
-    lstm_model, lstm_thr = train_model(lstm_model, X_train, y_train, X_val, y_val,
-                                        num_epochs=150, batch_size=32, patience=20)
+    # ────────── LSTM ──────────
+    print(f"\n{'─' * 70}")
+    print(f"  {ticker} LSTM + Attention Eğitiliyor")
+    print(f"{'─' * 70}")
+
+    lstm_model = TimeSeriesNet(
+        input_size, hidden_size, num_layers, output_size,
+        model_type="LSTM", bidirectional=False, use_attention=True
+    )
+    lstm_model = train_model(
+        lstm_model, X_train, y_train, X_val, y_val,
+        num_epochs=150, batch_size=32, patience=40
+    )
+    # Threshold: Val seti üzerinde (test seti DOKUNULMAZ)
+    lstm_thr = find_optimal_threshold(lstm_model, X_val, y_val, device)
     thresholds['LSTM'] = float(lstm_thr)
 
-    print(f"\n--- {ticker} GRU + Attention Egitiliyor (150 epoch, Focal Loss) ---")
-    gru_model = TimeSeriesNet(input_size, hidden_size, num_layers, output_size,
-                               model_type="GRU", bidirectional=False, use_attention=True)
-    gru_model, gru_thr = train_model(gru_model, X_train, y_train, X_val, y_val,
-                                      num_epochs=150, batch_size=32, patience=20)
+    # ────────── GRU ──────────
+    print(f"\n{'─' * 70}")
+    print(f"  {ticker} GRU + Attention Eğitiliyor")
+    print(f"{'─' * 70}")
+
+    gru_model = TimeSeriesNet(
+        input_size, hidden_size, num_layers, output_size,
+        model_type="GRU", bidirectional=False, use_attention=True
+    )
+    gru_model = train_model(
+        gru_model, X_train, y_train, X_val, y_val,
+        num_epochs=150, batch_size=32, patience=40
+    )
+    gru_thr = find_optimal_threshold(gru_model, X_val, y_val, device)
     thresholds['GRU'] = float(gru_thr)
-    
-    # ── Confusion Matrix + Dummy Baseline Degerlendirmesi ────────────────────
-    print("\n--- DL Modelleri Degerlendirme (Confusion Matrix + Dummy Baseline) ---")
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    y_val_int = y_val.astype(int)
 
-    def _eval_dl_model(model, threshold, name):
-        model.eval()
-        with torch.no_grad():
-            val_tensor = torch.FloatTensor(X_val).to(device)
-            logits = model(val_tensor)
-            probs = torch.sigmoid(logits).cpu().numpy().flatten()
-        preds = (probs > threshold).astype(int)
-        acc = np.mean(preds == y_val_int)
-        cm = confusion_matrix(y_val_int, preds)
-        tp = np.sum((preds == 1) & (y_val_int == 1))
-        fp = np.sum((preds == 1) & (y_val_int == 0))
-        fn = np.sum((preds == 0) & (y_val_int == 1))
-        precision = tp / (tp + fp + 1e-8)
-        recall = tp / (tp + fn + 1e-8)
-        f1 = 2 * precision * recall / (precision + recall + 1e-8)
-        print(f"\n  {name} (threshold={threshold:.2f}):")
-        print(f"  {'':12s} Tahmin DOWN  Tahmin UP")
-        print(f"  {'Gercek DOWN':12s} {cm[0][0]:>11}  {cm[0][1]:>9}")
-        print(f"  {'Gercek UP  ':12s} {cm[1][0]:>11}  {cm[1][1]:>9}")
-        if cm[0][1] == 0 or cm[1][0] == 0:
-            print(f"  UYARI: {name} yalnizca tek sinifi tahmin ediyor — model ogrenemiyor olabilir!")
-        return acc, f1
+    # ────────── FINAL DEĞERLENDİRME (TEST SETİ) ──────────
+    print(f"\n{'═' * 70}")
+    print(f"  FINAL DEĞERLENDİRME — TEST SETİ (hiç görülmemiş veri)")
+    print(f"{'═' * 70}")
 
-    lstm_acc, lstm_f1 = _eval_dl_model(lstm_model, lstm_thr, "LSTM")
-    gru_acc,  gru_f1  = _eval_dl_model(gru_model,  gru_thr,  "GRU")
+    lstm_acc, lstm_f1 = evaluate_model(
+        lstm_model, X_test, y_test, lstm_thr, "LSTM", device)
+    gru_acc, gru_f1 = evaluate_model(
+        gru_model, X_test, y_test, gru_thr, "GRU", device)
 
-    # ── Dummy Classifier Baseline ─────────────────────────────────────────────
-    print("\n--- Dummy Classifier Baseline (Referans) ---")
-    dummy_majority = DummyClassifier(strategy='most_frequent', random_state=42)
-    dummy_majority.fit(X_val.reshape(len(X_val), -1), y_val_int)
-    dummy_maj_preds = dummy_majority.predict(X_val.reshape(len(X_val), -1))
-    dummy_maj_acc = np.mean(dummy_maj_preds == y_val_int)
-    tp = np.sum((dummy_maj_preds == 1) & (y_val_int == 1))
-    fp = np.sum((dummy_maj_preds == 1) & (y_val_int == 0))
-    fn = np.sum((dummy_maj_preds == 0) & (y_val_int == 1))
-    dummy_maj_f1 = 2*(tp/(tp+fp+1e-8))*(tp/(tp+fn+1e-8)) / ((tp/(tp+fp+1e-8))+(tp/(tp+fn+1e-8))+1e-8)
+    # ── Dummy Baseline (Test seti üzerinde) ──
+    print(f"\n  {'─' * 50}")
+    print(f"  Dummy Classifier Baseline (Referans)")
+    X_test_flat = X_test.reshape(len(X_test), -1)
+    y_test_int = y_test.astype(int)
+
+    dummy_maj = DummyClassifier(strategy='most_frequent', random_state=42)
+    dummy_maj.fit(X_test_flat, y_test_int)
+    dummy_maj_acc = dummy_maj.score(X_test_flat, y_test_int)
+    dummy_maj_f1 = sklearn_f1(y_test_int, dummy_maj.predict(X_test_flat), zero_division=0)
 
     dummy_strat = DummyClassifier(strategy='stratified', random_state=42)
-    dummy_strat.fit(X_val.reshape(len(X_val), -1), y_val_int)
-    dummy_strat_preds = dummy_strat.predict(X_val.reshape(len(X_val), -1))
-    dummy_strat_acc = np.mean(dummy_strat_preds == y_val_int)
-    tp = np.sum((dummy_strat_preds == 1) & (y_val_int == 1))
-    fp = np.sum((dummy_strat_preds == 1) & (y_val_int == 0))
-    fn = np.sum((dummy_strat_preds == 0) & (y_val_int == 1))
-    dummy_strat_f1 = 2*(tp/(tp+fp+1e-8))*(tp/(tp+fn+1e-8)) / ((tp/(tp+fp+1e-8))+(tp/(tp+fn+1e-8))+1e-8)
+    dummy_strat.fit(X_test_flat, y_test_int)
+    dummy_strat_acc = dummy_strat.score(X_test_flat, y_test_int)
+    dummy_strat_f1 = sklearn_f1(y_test_int, dummy_strat.predict(X_test_flat), zero_division=0)
 
-    print(f"\n  {'Model':<25} {'Accuracy':>10} {'F1':>8}")
-    print(f"  {'-'*43}")
-    print(f"  {'Dummy (Cogunluk Sinifi)':<25} {dummy_maj_acc:>10.4f} {dummy_maj_f1:>8.4f}")
-    print(f"  {'Dummy (Orantili Rastgele)':<25} {dummy_strat_acc:>10.4f} {dummy_strat_f1:>8.4f}")
-    print(f"  {'LSTM':<25} {lstm_acc:>10.4f} {lstm_f1:>8.4f}")
-    print(f"  {'GRU':<25} {gru_acc:>10.4f} {gru_f1:>8.4f}")
-    print(f"  {'-'*43}")
-    best_dummy_acc = max(dummy_maj_acc, dummy_strat_acc)
-    for mname, macc in [("LSTM", lstm_acc), ("GRU", gru_acc)]:
-        if macc > best_dummy_acc:
-            print(f"  SONUC: {mname} dummy baseline'i GECTI ({macc:.4f} > {best_dummy_acc:.4f}).")
+    print(f"\n  {'Model':<28} {'Accuracy':>10} {'F1':>8}")
+    print(f"  {'─' * 48}")
+    print(f"  {'Dummy (Çoğunluk Sınıfı)':<28} {dummy_maj_acc:>10.4f} {dummy_maj_f1:>8.4f}")
+    print(f"  {'Dummy (Orantılı Rastgele)':<28} {dummy_strat_acc:>10.4f} {dummy_strat_f1:>8.4f}")
+    print(f"  {'LSTM':<28} {lstm_acc:>10.4f} {lstm_f1:>8.4f}")
+    print(f"  {'GRU':<28} {gru_acc:>10.4f} {gru_f1:>8.4f}")
+    print(f"  {'─' * 48}")
+
+    best_dummy = max(dummy_maj_acc, dummy_strat_acc)
+    for mname, macc, mf1 in [("LSTM", lstm_acc, lstm_f1), ("GRU", gru_acc, gru_f1)]:
+        if macc > best_dummy and mf1 > 0:
+            print(f"  ✅ {mname}: Dummy baseline'ı GEÇTİ ({macc:.4f} > {best_dummy:.4f})")
         else:
-            print(f"  UYARI: {mname} dummy baseline'i GECEMIYOR ({macc:.4f} <= {best_dummy_acc:.4f}).")
+            print(f"  ⚠️  {mname}: Dummy baseline'ı GEÇEMİYOR ({macc:.4f} ≤ {best_dummy:.4f})")
+            if mf1 == 0:
+                print(f"      → F1=0: Model tek sınıf tahmin ediyor. "
+                      f"Feature kalitesini kontrol edin!")
 
-    # Modelleri kaydet
+    # ── Modelleri kaydet ──
     models_dir = os.path.join(base_dir, 'src', 'models', 'saved_models')
     os.makedirs(models_dir, exist_ok=True)
 
-    torch.save(lstm_model.state_dict(), os.path.join(models_dir, f'{ticker}_lstm_best.pth'))
-    torch.save(gru_model.state_dict(), os.path.join(models_dir, f'{ticker}_gru_best.pth'))
-    
-    # Optimal thresholdlari kaydet
+    torch.save(lstm_model.state_dict(),
+               os.path.join(models_dir, f'{ticker}_lstm_best.pth'))
+    torch.save(gru_model.state_dict(),
+               os.path.join(models_dir, f'{ticker}_gru_best.pth'))
+
     thr_path = os.path.join(models_dir, f'{ticker}_dl_thresholds.json')
     with open(thr_path, 'w') as f:
         json.dump(thresholds, f)
-    print(f"\n{ticker} modelleri ve thresholdlar '{models_dir}' dizinine kaydedildi.")
-    print(f"  Thresholds: {thresholds}")
+
+    print(f"\n  💾 Modeller kaydedildi: {models_dir}")
+    print(f"     Thresholds: {thresholds}")
+
+    # ── ÖNEMLİ NOT ──
+    print(f"\n{'═' * 70}")
+    print(f"  ℹ️  NOT: Bu düzeltme modelin DAVRANIŞını iyileştirir ama")
+    print(f"  tahmin KALİTESİ feature engineering'e bağlıdır.")
+    print(f"  Eğer F1 hâlâ düşükse → data_pipeline.py'de:")
+    print(f"    1. Log-return features ekleyin (ham fiyat yerine)")
+    print(f"    2. Lag features ekleyin (return_lag_1, 5, 10, 20)")
+    print(f"    3. Cyclical time encoding (sin/cos)")
+    print(f"    4. Daha fazla indikatör (ADX, Stochastic, MFI...)")
+    print(f"{'═' * 70}")
+
 
 if __name__ == "__main__":
     main()

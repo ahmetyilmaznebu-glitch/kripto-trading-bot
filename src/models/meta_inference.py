@@ -62,20 +62,16 @@ def compute_meta_probs(base_dir: str, ticker: str = "BTC-USD"):
 
     # Tabular ML girdilerini, ensemble_model.main icindeki mantikla uyumlu sekilde hazirla
     ml_features = [
-        "Open",
-        "High",
-        "Low",
-        "Close",
-        "Volume",
-        "RSI",
-        "MACD",
-        "MACD_Signal",
-        "BB_High",
-        "BB_Low",
-        "BB_Mid",
-        "SMA_20",
-        "EMA_50",
+        "Open", "High", "Low", "Close", "Volume",
+        "RSI", "MACD", "MACD_Signal",
+        "BB_High", "BB_Low", "BB_Mid",
+        "SMA_20", "EMA_50",
+        "Log_Return", "Return_Lag_5", "Return_Lag_10", "Return_Lag_20",
+        "Daily_Return", "Volatility_20", "Momentum_10", "Volume_Change",
+        "ATR", "ADX", "Stoch_K", "OBV_Change",
+        "Price_To_SMA20", "Price_To_EMA50",
     ]
+    ml_features = [c for c in ml_features if c in df.columns]
 
     X_ml_base = df[ml_features].values
 

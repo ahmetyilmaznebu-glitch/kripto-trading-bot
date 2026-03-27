@@ -101,14 +101,17 @@ def train_classification_models(X_train, y_train, X_test, y_test):
     print(f"  XGB Test F1 Score: {xgb_f1:.4f}")
     results['xgb'] = {'model': xgb_model, 'accuracy': xgb_acc, 'f1': xgb_f1}
     
-    # Feature importance raporu
     print("\n--- Feature Importance Raporu ---")
     feature_names = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD',
-                     'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50']
+                     'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50',
+                     'Log_Return', 'Return_Lag_5', 'Return_Lag_10', 'Return_Lag_20',
+                     'Daily_Return', 'Volatility_20', 'Momentum_10', 'Volume_Change',
+                     'ATR', 'ADX', 'Stoch_K', 'OBV_Change',
+                     'Price_To_SMA20', 'Price_To_EMA50']
     rf_imp = rf_model.feature_importances_
     xgb_imp = xgb_model.feature_importances_
-    for i, name in enumerate(feature_names):
-        print(f"  {name:15s} | RF: {rf_imp[i]:.4f} | XGB: {xgb_imp[i]:.4f}")
+    for i, name in enumerate(feature_names[:len(rf_imp)]):
+        print(f"  {name:18s} | RF: {rf_imp[i]:.4f} | XGB: {xgb_imp[i]:.4f}")
 
     # ── Confusion Matrix ─────────────────────────────────────────
     # Modelin gercekten ogrenip ogrenmedigini gosterir.
@@ -171,7 +174,13 @@ def main(ticker="BTC-USD"):
     df = pd.read_csv(csv_path, index_col=0)
     
     feature_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD',
-                    'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50']
+                    'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50',
+                    'Log_Return', 'Return_Lag_5', 'Return_Lag_10', 'Return_Lag_20',
+                    'Daily_Return', 'Volatility_20', 'Momentum_10', 'Volume_Change',
+                    'ATR', 'ADX', 'Stoch_K', 'OBV_Change',
+                    'Price_To_SMA20', 'Price_To_EMA50']
+    # Sadece mevcut sutunlari kullan
+    feature_cols = [c for c in feature_cols if c in df.columns]
     
     # DUZELTME: Sliding-window hizalamasi ile feature hazirla
     # Ensemble model ile ayni mantik kullanilmali

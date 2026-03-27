@@ -28,7 +28,7 @@ def load_models(models_dir, input_size, ticker="BTC-USD"):
     # LSTM modeli — num_layers state dict'ten otomatik tespit edilir
     lstm_path = os.path.join(models_dir, f'{ticker}_lstm_best.pth')
     lstm_sd = torch.load(lstm_path, map_location=device, weights_only=True)
-    lstm = TimeSeriesNet(input_size, hidden_size=128, num_layers=_detect_num_layers(lstm_sd),
+    lstm = TimeSeriesNet(input_size, hidden_size=64, num_layers=_detect_num_layers(lstm_sd),
                          output_size=1, model_type="LSTM", use_attention=True)
     lstm.load_state_dict(lstm_sd)
     lstm.to(device)
@@ -37,7 +37,7 @@ def load_models(models_dir, input_size, ticker="BTC-USD"):
     # GRU modeli — num_layers state dict'ten otomatik tespit edilir
     gru_path = os.path.join(models_dir, f'{ticker}_gru_best.pth')
     gru_sd = torch.load(gru_path, map_location=device, weights_only=True)
-    gru = TimeSeriesNet(input_size, hidden_size=128, num_layers=_detect_num_layers(gru_sd),
+    gru = TimeSeriesNet(input_size, hidden_size=64, num_layers=_detect_num_layers(gru_sd),
                         output_size=1, model_type="GRU", use_attention=True)
     gru.load_state_dict(gru_sd)
     gru.to(device)
@@ -69,6 +69,20 @@ def get_predictions(X_dl, X_ml, lstm, gru, rf, xgb):
     
     return lstm_preds, gru_preds, rf_preds, xgb_preds
 
+def _add_cross_features(X):
+    """
+    Base model tahminleri üzerine çapraz özellikler (cross-features) ekler.
+    X shape: (N, 4) -> (N, 7)
+    Yeni özellikler:
+      - mean_pred: Tahminlerin ortalaması (fikir birliği)
+      - std_pred: Tahminlerin standart sapması (kararsızlık/varyans)
+      - spread_pred: Max - Min tahmin farkı
+    """
+    mean_pred = np.mean(X, axis=1, keepdims=True)
+    std_pred = np.std(X, axis=1, keepdims=True)
+    spread_pred = (np.max(X, axis=1) - np.min(X, axis=1)).reshape(-1, 1)
+    
+    return np.hstack((X, mean_pred, std_pred, spread_pred))
 
 def main(ticker="BTC-USD"):
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -81,7 +95,12 @@ def main(ticker="BTC-USD"):
     
     WINDOW_SIZE = 60
     ml_features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD',
-                    'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50']
+                    'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50',
+                    'Log_Return', 'Return_Lag_5', 'Return_Lag_10', 'Return_Lag_20',
+                    'Daily_Return', 'Volatility_20', 'Momentum_10', 'Volume_Change',
+                    'ATR', 'ADX', 'Stoch_K', 'OBV_Change',
+                    'Price_To_SMA20', 'Price_To_EMA50']
+    ml_features = [c for c in ml_features if c in df.columns]
     
     X_ml_base = df[ml_features].values
     

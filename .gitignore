@@ -45,3 +45,10 @@ Thumbs.db
 *.pptx
 *.docx
 *.pdf
+
+# Geçici / üretilmiş dosyalar
+reports/interactive/
+git_status_output.txt
+_generate_pdf.py
+_update_doc.py
+rapor_ilk8hafta.md

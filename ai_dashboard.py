@@ -145,7 +145,12 @@ def evaluate_ml_models(df, ticker="BTC-USD"):
     # sklearn artik top-level'da import ediliyor (deadlock onlemi)
     
     features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD',
-                 'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50']
+                'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50',
+                'Log_Return', 'Return_Lag_5', 'Return_Lag_10', 'Return_Lag_20',
+                'Daily_Return', 'Volatility_20', 'Momentum_10', 'Volume_Change',
+                'ATR', 'ADX', 'Stoch_K', 'OBV_Change',
+                'Price_To_SMA20', 'Price_To_EMA50']
+    features = [c for c in features if c in df.columns]
     
     df_eval = df.copy()
     # Direction sutunu varsa onu kullan (olcekleme oncesi olusturulmus)
@@ -206,7 +211,7 @@ def evaluate_dl_models(ticker="BTC-USD"):
             sd = torch.load(path, map_location='cpu', weights_only=True)
             num_layers = len([k for k in sd.keys() if k.startswith('rnn.weight_ih')])
             num_layers = max(num_layers, 1)
-            model = TimeSeriesNet(X.shape[2], hidden_size=128, num_layers=num_layers,
+            model = TimeSeriesNet(X.shape[2], hidden_size=64, num_layers=num_layers,
                                   output_size=1, model_type=name, use_attention=True)
             model.load_state_dict(torch.load(path, map_location='cpu', weights_only=True))
             model.eval()
@@ -1023,6 +1028,270 @@ def page_data():
 
 
 # ─────────────────────────────────────────────────────────────
+#  SAYFA: Dataset Görüntüleme
+# ─────────────────────────────────────────────────────────────
+def page_dataset_viewer():
+    st.header("📋 Dataset Görüntüleme")
+    
+    st.info("""
+    **Bu sayfa ne gösterir?**  
+    Modellerin eğitiminde kullanılan ham ve işlenmiş veri setlerini tablo formatında görüntüler.  
+    Verileri filtreleyebilir, istatistiklerini inceleyebilir ve CSV olarak indirebilirsiniz.
+    """)
+    
+    raw_df = load_raw_data(selected_ticker)
+    processed_df = load_processed_data(selected_ticker)
+    
+    # ── Veri Seti Secimi ──
+    dataset_choice = st.radio(
+        "📂 Görüntülenecek veri setini seçin:",
+        ["Ham Veri (Raw)", "İşlenmiş Veri (Processed)", "Her İkisi"],
+        horizontal=True
+    )
+    
+    st.markdown("---")
+    
+    # ════════════════════════════════════════════════════════
+    #  HAM VERİ
+    # ════════════════════════════════════════════════════════
+    if dataset_choice in ["Ham Veri (Raw)", "Her İkisi"]:
+        st.subheader(f"📄 Ham Veri — {selected_ticker}")
+        
+        if raw_df is not None:
+            # Bilgi kartlari
+            info_col1, info_col2, info_col3, info_col4 = st.columns(4)
+            info_col1.metric("Satır Sayısı", f"{len(raw_df):,}")
+            info_col2.metric("Sütun Sayısı", f"{len(raw_df.columns)}")
+            if 'Date' in raw_df.columns:
+                info_col3.metric("Başlangıç", str(raw_df['Date'].min())[:10])
+                info_col4.metric("Bitiş", str(raw_df['Date'].max())[:10])
+            elif 'Open Time' in raw_df.columns:
+                info_col3.metric("Başlangıç", str(raw_df['Open Time'].iloc[0])[:10])
+                info_col4.metric("Bitiş", str(raw_df['Open Time'].iloc[-1])[:10])
+            
+            # Filtre: Son N satir
+            filter_col1, filter_col2 = st.columns([1, 3])
+            with filter_col1:
+                row_option = st.selectbox(
+                    "Gösterilecek satırlar:",
+                    ["Tüm Veri", "İlk 50", "İlk 100", "Son 50", "Son 100"],
+                    key="raw_row_filter"
+                )
+            
+            if row_option == "İlk 50":
+                display_raw = raw_df.head(50)
+            elif row_option == "İlk 100":
+                display_raw = raw_df.head(100)
+            elif row_option == "Son 50":
+                display_raw = raw_df.tail(50)
+            elif row_option == "Son 100":
+                display_raw = raw_df.tail(100)
+            else:
+                display_raw = raw_df
+            
+            # Tablo
+            st.dataframe(
+                display_raw,
+                use_container_width=True,
+                height=450,
+                hide_index=True
+            )
+            
+            # İstatistikler
+            with st.expander("📊 Ham Veri İstatistikleri", expanded=False):
+                st.dataframe(
+                    raw_df.describe().round(4),
+                    use_container_width=True
+                )
+            
+            # İnteraktif Grafik
+            with st.expander("📈 Ham Veri Grafikleri", expanded=False):
+                numeric_cols_raw = raw_df.select_dtypes(include=[np.number]).columns.tolist()
+                selected_raw_cols = st.multiselect(
+                    "Görselleştirilecek sütunları seçin:",
+                    numeric_cols_raw,
+                    default=[c for c in ['Close', 'Volume'] if c in numeric_cols_raw],
+                    key="raw_chart_cols"
+                )
+                if selected_raw_cols:
+                    x_axis = raw_df['Date'] if 'Date' in raw_df.columns else (
+                        raw_df['Open Time'] if 'Open Time' in raw_df.columns else raw_df.index
+                    )
+                    fig_raw = go.Figure()
+                    colors = ['#667eea', '#f093fb', '#4facfe', '#43e97b', '#fa709a',
+                              '#fee140', '#30cfd0', '#a8edea', '#fed6e3', '#d299c2']
+                    for i, col in enumerate(selected_raw_cols):
+                        fig_raw.add_trace(go.Scatter(
+                            x=x_axis, y=raw_df[col],
+                            name=col,
+                            line={"color": colors[i % len(colors)], "width": 2}
+                        ))
+                    fig_raw.update_layout(
+                        title=f'{selected_ticker} — Ham Veri Zaman Serisi',
+                        xaxis_title='Tarih',
+                        yaxis_title='Değer',
+                        template='plotly_dark',
+                        height=400,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02)
+                    )
+                    st.plotly_chart(fig_raw, use_container_width=True)
+            
+            # CSV İndirme
+            csv_raw = raw_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="⬇️ Ham Veriyi CSV Olarak İndir",
+                data=csv_raw,
+                file_name=f"{selected_ticker}_raw_data.csv",
+                mime="text/csv",
+                key="download_raw"
+            )
+        else:
+            st.warning("⚠️ Ham veri dosyası bulunamadı. Lütfen önce veri pipeline'ını çalıştırın.")
+    
+    if dataset_choice == "Her İkisi":
+        st.markdown("---")
+    
+    # ════════════════════════════════════════════════════════
+    #  İŞLENMİŞ VERİ
+    # ════════════════════════════════════════════════════════
+    if dataset_choice in ["İşlenmiş Veri (Processed)", "Her İkisi"]:
+        st.subheader(f"⚙️ İşlenmiş (Ölçeklenmiş) Veri — {selected_ticker}")
+        
+        if processed_df is not None:
+            # Bilgi kartlari
+            p_col1, p_col2, p_col3, p_col4 = st.columns(4)
+            p_col1.metric("Satır Sayısı", f"{len(processed_df):,}")
+            p_col2.metric("Sütun Sayısı", f"{len(processed_df.columns)}")
+            null_count = int(processed_df.isnull().sum().sum())
+            p_col3.metric("Eksik Değer", f"{null_count:,}")
+            p_col4.metric("Veri Tipi", "float64 (ölçeklenmiş)")
+            
+            # Sütun secimi
+            all_cols = processed_df.columns.tolist()
+            col_groups = {
+                "Fiyat": [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in all_cols],
+                "Teknik Göstergeler": [c for c in ['RSI', 'MACD', 'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid',
+                                                    'SMA_20', 'EMA_50', 'ATR', 'ADX', 'Stoch_K', 'OBV_Change'] if c in all_cols],
+                "Getiri & Volatilite": [c for c in ['Log_Return', 'Return_Lag_5', 'Return_Lag_10', 'Return_Lag_20',
+                                                     'Daily_Return', 'Volatility_20', 'Momentum_10', 'Volume_Change'] if c in all_cols],
+                "Oran & Hedef": [c for c in ['Price_To_SMA20', 'Price_To_EMA50', 'Target_Close', 'Direction'] if c in all_cols],
+            }
+            
+            show_col1, show_col2 = st.columns([1, 3])
+            with show_col1:
+                col_group_choice = st.selectbox(
+                    "Sütun grubu:",
+                    ["Tüm Sütunlar"] + list(col_groups.keys()),
+                    key="proc_col_group"
+                )
+            
+            if col_group_choice == "Tüm Sütunlar":
+                display_cols = all_cols
+            else:
+                display_cols = col_groups[col_group_choice]
+            
+            # Filtre: Son N satir
+            with show_col2:
+                row_option_proc = st.selectbox(
+                    "Gösterilecek satırlar:",
+                    ["Tüm Veri", "İlk 50", "İlk 100", "Son 50", "Son 100"],
+                    key="proc_row_filter"
+                )
+            
+            proc_display = processed_df[display_cols]
+            if row_option_proc == "İlk 50":
+                proc_display = proc_display.head(50)
+            elif row_option_proc == "İlk 100":
+                proc_display = proc_display.head(100)
+            elif row_option_proc == "Son 50":
+                proc_display = proc_display.tail(50)
+            elif row_option_proc == "Son 100":
+                proc_display = proc_display.tail(100)
+            
+            # Tablo
+            st.dataframe(
+                proc_display.style.format("{:.6f}", na_rep="-"),
+                use_container_width=True,
+                height=450
+            )
+            
+            # İstatistikler
+            with st.expander("📊 İşlenmiş Veri İstatistikleri", expanded=False):
+                desc = processed_df[display_cols].describe().T
+                desc['null'] = processed_df[display_cols].isnull().sum()
+                st.dataframe(
+                    desc.style.format({
+                        'count': '{:.0f}', 'mean': '{:.4f}', 'std': '{:.4f}',
+                        'min': '{:.4f}', '25%': '{:.4f}', '50%': '{:.4f}',
+                        '75%': '{:.4f}', 'max': '{:.4f}', 'null': '{:.0f}'
+                    }),
+                    use_container_width=True,
+                    height=400
+                )
+            
+            # İnteraktif Grafik
+            with st.expander("📈 İşlenmiş Veri Grafikleri", expanded=False):
+                numeric_proc = processed_df.select_dtypes(include=[np.number]).columns.tolist()
+                selected_proc_cols = st.multiselect(
+                    "Görselleştirilecek sütunları seçin:",
+                    numeric_proc,
+                    default=[c for c in ['Close', 'RSI', 'MACD'] if c in numeric_proc],
+                    key="proc_chart_cols"
+                )
+                if selected_proc_cols:
+                    fig_proc = go.Figure()
+                    colors = ['#667eea', '#f093fb', '#4facfe', '#43e97b', '#fa709a',
+                              '#fee140', '#30cfd0', '#a8edea', '#fed6e3', '#d299c2']
+                    for i, col in enumerate(selected_proc_cols):
+                        fig_proc.add_trace(go.Scatter(
+                            y=processed_df[col],
+                            name=col,
+                            line={"color": colors[i % len(colors)], "width": 2}
+                        ))
+                    fig_proc.update_layout(
+                        title=f'{selected_ticker} — İşlenmiş Veri Zaman Serisi (Ölçeklenmiş)',
+                        xaxis_title='İndeks',
+                        yaxis_title='Değer (0-1 arası)',
+                        template='plotly_dark',
+                        height=400,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02)
+                    )
+                    st.plotly_chart(fig_proc, use_container_width=True)
+            
+            # Korelasyon Matrisi
+            with st.expander("🔗 Sütunlar Arası Korelasyon", expanded=False):
+                corr_cols = [c for c in ['Close', 'Volume', 'RSI', 'MACD', 'MACD_Signal',
+                                          'BB_High', 'BB_Low', 'SMA_20', 'EMA_50',
+                                          'ATR', 'ADX', 'Stoch_K', 'Target_Close']
+                             if c in processed_df.columns]
+                if len(corr_cols) > 2:
+                    corr = processed_df[corr_cols].corr().round(2)
+                    fig_corr = px.imshow(
+                        corr, text_auto=True,
+                        color_continuous_scale='RdBu_r',
+                        zmin=-1, zmax=1
+                    )
+                    fig_corr.update_layout(
+                        title='Özellikler Arası Korelasyon Matrisi',
+                        template='plotly_dark',
+                        height=550
+                    )
+                    st.plotly_chart(fig_corr, use_container_width=True)
+            
+            # CSV İndirme
+            csv_proc = processed_df.to_csv().encode('utf-8')
+            st.download_button(
+                label="⬇️ İşlenmiş Veriyi CSV Olarak İndir",
+                data=csv_proc,
+                file_name=f"{selected_ticker}_processed_data.csv",
+                mime="text/csv",
+                key="download_proc"
+            )
+        else:
+            st.warning("⚠️ İşlenmiş veri dosyası bulunamadı. Lütfen önce veri pipeline'ını çalıştırın.")
+
+
+# ─────────────────────────────────────────────────────────────
 #  Ana Uygulama
 # ─────────────────────────────────────────────────────────────
 def main():
@@ -1034,6 +1303,7 @@ def main():
         
         page = st.radio("📑 Sayfa Seçin", [
             "🏠 Genel Bakış",
+            "📋 Dataset Görüntüleme",
             "🔬 Veri Pipeline & Özellikler",
             "📈 Fiyat Tahmini (LSTM/GRU)",
             "🔔 Sinyal Üretimi (XGB/RF)",
@@ -1055,6 +1325,8 @@ def main():
     # Sayfa yonlendirmesi
     if "Genel Bakış" in page:
         page_overview()
+    elif "Dataset Görüntüleme" in page:
+        page_dataset_viewer()
     elif "Veri Pipeline" in page:
         page_data_pipeline()
     elif "Fiyat Tahmini" in page:

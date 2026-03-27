@@ -438,10 +438,14 @@ def fetch_data(ticker="BTC-USD"):
 # ─────────────────────────────────────────────────────────────
 
 def add_technical_indicators(df):
-    print("Teknik indikatorler (RSI, MACD, Bollinger Bands, SMA, EMA) hesaplaniyor...")
+    print("Teknik indikatorler hesaplaniyor (temel + gelişmiş özellikler)...")
     
     close = df['Close']
+    high = df['High']
+    low = df['Low']
+    volume = df['Volume']
     
+    # ── Temel İndikatörler ──
     # RSI
     df['RSI'] = ta.momentum.RSIIndicator(close=close, window=14).rsi()
     # MACD
@@ -457,25 +461,46 @@ def add_technical_indicators(df):
     df['SMA_20'] = ta.trend.SMAIndicator(close=close, window=20).sma_indicator()
     df['EMA_50'] = ta.trend.EMAIndicator(close=close, window=50).ema_indicator()
     
-    # === YENİ: Getiri ve Momentum Özellikleri (flat line sorununu çözmek için) ===
-    # Günlük getiri oranı (yüzdelik değişim)
-    df['Daily_Return'] = close.pct_change()
-    # 20 günlük fiyat volatilitesi
-    df['Volatility_20'] = close.rolling(window=20).std() / close.rolling(window=20).mean()
-    # 10 günlük momentum (fiyatın 10 gün öncesine göre değişimi)
-    df['Momentum_10'] = close / close.shift(10) - 1
-    # Hacim değişim oranı
-    df['Volume_Change'] = df['Volume'].pct_change()
+    # ── Getiri Tabanlı Özellikler (DL modeller için kritik) ──
+    # Log-return: fiyat seviyesi yerine değişim oranı — LSTM'in en iyi anlayacağı format
+    df['Log_Return'] = np.log(close / close.shift(1))
+    # Çok periyotlu log-return (kısa/orta/uzun vadeli trend)
+    df['Return_Lag_5'] = np.log(close / close.shift(5))
+    df['Return_Lag_10'] = np.log(close / close.shift(10))
+    df['Return_Lag_20'] = np.log(close / close.shift(20))
     
-    # Hedef degisken: t+1 gunun kapanis fiyati
+    # ── Günlük getiri ve volatilite/momentum ──
+    df['Daily_Return'] = close.pct_change()
+    df['Volatility_20'] = close.rolling(window=20).std() / close.rolling(window=20).mean()
+    df['Momentum_10'] = close / close.shift(10) - 1
+    df['Volume_Change'] = volume.pct_change()
+    
+    # ── Ek Teknik Göstergeler ──
+    # ATR: Average True Range (volatilite ölçüsü)
+    df['ATR'] = ta.volatility.AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
+    # ADX: Trend gücü göstergesi
+    df['ADX'] = ta.trend.ADXIndicator(high=high, low=low, close=close, window=14).adx()
+    # Stochastic Oscillator %K: Aşırı alım/satım
+    df['Stoch_K'] = ta.momentum.StochasticOscillator(high=high, low=low, close=close, window=14).stoch()
+    # OBV değişim oranı: Hacim-fiyat uyumu
+    obv = ta.volume.OnBalanceVolumeIndicator(close=close, volume=volume).on_balance_volume()
+    df['OBV_Change'] = obv.pct_change()
+    
+    # ── Fiyat-Ortalama Oranları (mean-reversion sinyali) ──
+    df['Price_To_SMA20'] = close / df['SMA_20']
+    df['Price_To_EMA50'] = close / df['EMA_50']
+    
+    # ── Hedef Değişken ──
     df['Target_Close'] = df['Close'].shift(-1)
     
     # KRITIK: Binary yon etiketini OLCEKLEME ONCESI olustur (gercek fiyat karsilastirmasi)
-    # 1 = UP (yarin kapanis bugunun kapanisinin uzerinde), 0 = DOWN
     df['Direction'] = (df['Target_Close'] > df['Close']).astype(int)
     
-    # NaN satirlarini temizle
+    # Inf ve NaN temizle
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
+    
+    print(f"  Toplam özellik sayısı: {len(df.columns) - 2} (Target_Close ve Direction hariç)")
     return df
 
 
@@ -514,31 +539,79 @@ def scale_data(df, feature_cols, target_col, train_ratio=0.8, ticker="BTC-USD"):
     return df_scaled
 
 
-def create_sliding_windows(data, window_size, feature_cols=None):
-    print(f"Sliding windows ({window_size} adimlik) olusturuluyor...")
+def create_sliding_windows(data, window_size, feature_cols=None, normalize_windows=True):
+    """
+    Sliding window dizileri olusturur.
+
+    normalize_windows=True (varsayilan):
+        Fiyat seviyesi iceren sutunlar (Open, High, Low, Close, Volume,
+        BB_High, BB_Low, BB_Mid, SMA_20, EMA_50, ATR) her pencere icinde
+        kendi ilk degerine gore yuzde-degisim olarak normalize edilir:
+            X[t, j] = X[t, j] / X[0, j] - 1.0
+
+        Boylece LSTM mutlak fiyat seviyesi degil HAREKET gorur.
+        RSI, MACD, Log_Return gibi zaten duragan ozellikler dokunulmadan
+        MinMaxScaler ciktisi olarak kalir.
+
+        Neden gerekli:
+        - MinMaxScaler egitim verisine fit edilir (orn. BTC $5K-$50K)
+        - Test setinde BTC $80K+ → olcekli deger > 1.0 (dagılım dışı)
+        - LSTM bu durumda 'hep UP tahmin et' minimine sıkışır
+        - Pencere-ici normalizasyon bu sorunu tamamen ortadan kaldirir
+    """
+    # Fiyat seviyesi ozellikleri — pencere bazlı normalize edilecek
+    # NOT: Volume ve ATR dahil edilmez — bu sutunlar MinMaxScaler sonrasi
+    # zaman zaman 0'a cok yakin referans deger alir. Bolme islemi yapilinca
+    # 500-25000 gibi asiri buyuk degerler olusur ve LSTM gradyanlarini bozar.
+    # Volume zaten Volume_Change (pct_change) olarak, ATR de Log_Return /
+    # Volatility_20 ile temsil edilmektedir.
+    PRICE_LEVEL_COLS = {
+        'Open', 'High', 'Low', 'Close',
+        'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50'
+    }
+
+    print(f"Sliding windows ({window_size} adimlik) olusturuluyor"
+          f"{' [pencere-ici normalizasyon ACIK]' if normalize_windows else ''}...")
     X, y = [], []
-    
-    # DUZELTME (Hata #2): Sadece belirtilen feature sutunlarini kullan
-    # Bu sayede DL ve ML modelleri ayni feature set'ini gorur
+
     if feature_cols is not None:
         features = data[feature_cols].values
+        col_names = list(feature_cols)
     else:
-        # Fallback: Target_Close ve Direction haricindeki tum sutunlari kullan
         drop_cols = ['Target_Close', 'Direction']
         existing_drop = [c for c in drop_cols if c in data.columns]
-        features = data.drop(columns=existing_drop).values
-    
-    # Hedef: binary Direction etiketi (0=DOWN, 1=UP)
+        feat_df = data.drop(columns=existing_drop)
+        features = feat_df.values
+        col_names = list(feat_df.columns)
+
+    # Hangi indekslerin fiyat seviyesi oldugunu tespit et
+    price_indices = [i for i, c in enumerate(col_names) if c in PRICE_LEVEL_COLS]
+
     if 'Direction' in data.columns:
         targets = data['Direction'].values
     else:
-        # Fallback: eski yontem (eger Direction yoksa)
         targets = data['Target_Close'].values
-    
+
     for i in range(len(data) - window_size):
-        X.append(features[i:i+window_size])
-        y.append(targets[i+window_size-1])
-        
+        window = features[i:i + window_size].copy()
+
+        if normalize_windows and price_indices:
+            for j in price_indices:
+                ref = window[0, j]
+                if ref != 0.0:
+                    window[:, j] = window[:, j] / ref - 1.0
+                    # Asiri buyuk/kucuk degerleri kisit: [-3, 3] araligi
+                    # kripto icin 3 sigma siniri yeterli (300% kazanc/kayip)
+                    window[:, j] = np.clip(window[:, j], -3.0, 3.0)
+                # ref == 0 ise sutunu oldugu gibi birak (NaN/Inf riski yok)
+
+        X.append(window)
+        y.append(targets[i + window_size - 1])
+
+    if normalize_windows:
+        print(f"  Normalize edilen sutunlar ({len(price_indices)}): "
+              f"{[col_names[i] for i in price_indices]}")
+
     return np.array(X), np.array(y)
 
 
@@ -574,10 +647,13 @@ def main(ticker="BTC-USD"):
     print(f"✅ {ticker}: Indikator hesaplamasi sonrasi {len(processed_df)} satir kaldi.\n")
     
     # 3. Olceklendirme (Scaling)
-    # DUZELTME (Hata #9): Yeni eklenen ozellikler de olcekleniyor
+    # Genişletilmiş özellik seti (27 özellik)
     feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD',
                        'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50',
-                       'Daily_Return', 'Volatility_20', 'Momentum_10', 'Volume_Change']
+                       'Log_Return', 'Return_Lag_5', 'Return_Lag_10', 'Return_Lag_20',
+                       'Daily_Return', 'Volatility_20', 'Momentum_10', 'Volume_Change',
+                       'ATR', 'ADX', 'Stoch_K', 'OBV_Change',
+                       'Price_To_SMA20', 'Price_To_EMA50']
     
     # Sadece mevcut sutunlari olcekle (eger bazi sutunlar yoksa hata vermesin)
     feature_columns = [c for c in feature_columns if c in processed_df.columns]
