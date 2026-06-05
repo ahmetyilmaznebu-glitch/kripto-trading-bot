@@ -1,6 +1,6 @@
 # Kripto Para Yön Tahmini — Karar Destek Sistemi
 
-> **Proje:** Ahmet Yılmaz — 23100011075 — Near East University  
+> **Proje:** Ahmet Yılmaz — 23100011075 — Necmettin Erbakan Üniversitesi 
 > **Danışman:** Doç. Dr. Muhammed Karaaltun  
 > **Ders:** Bilgisayar Mühendisliği Uygulama Tasarımı
 
