@@ -1,0 +1,28 @@
+{
+  "accuracy": 0.5903890160183066,
+  "f1": 0.5768321513002365,
+  "precision": 0.5865384615384616,
+  "recall": 0.5674418604651162,
+  "confusion_matrix": [
+    [
+      136,
+      86
+    ],
+    [
+      93,
+      122
+    ]
+  ],
+  "auc_roc": 0.6231091556672952,
+  "support": {
+    "total": 437,
+    "class_0": 222,
+    "class_1": 215
+  },
+  "best_weights": {
+    "rf": 0.4,
+    "xgb": 0.4,
+    "lstm": 0.2
+  },
+  "lstm_degenerate": false
+}

@@ -46,8 +46,10 @@ from sklearn.dummy import DummyClassifier
 #  SABITLER
 # ══════════════════════════════════════════════════════════════
 
-WINDOW_SIZE = 60          # Sliding window boyutu (data_pipeline ile uyumlu)
-PURGE_GAP = WINDOW_SIZE   # Train/Val ve Val/Test arasındaki boşluk
+# DEĞİŞTİRİLDİ (2026-06-05): ml_config.py ile senkronize
+# Eski: WINDOW_SIZE=60, PURGE_GAP=60
+WINDOW_SIZE = 30          # Sliding window boyutu (ml_config.py ile uyumlu)
+PURGE_GAP = 14            # Train/Val ve Val/Test arasındaki boşluk
 DEGENERATE_PATIENCE = 5   # Art arda kaç epoch dejenere davranış toleransı
 DEGENERATE_THRESHOLD = 0.95  # Tahminlerin %95'i tek sınıfsa → dejenere
 
@@ -271,8 +273,16 @@ def train_model(model, X_train, y_train, X_val, y_val,
     val_dataset = torch.utils.data.TensorDataset(
         torch.FloatTensor(X_val), torch.FloatTensor(y_val.astype(np.float32)))
 
+    # Balanced mini-batch: azinlik sinifini oversampling ile dengele
+    class_counts = np.bincount(y_train.astype(int), minlength=2)
+    sample_weights = np.where(y_train >= 0.5, 1.0 / (class_counts[1] + 1), 1.0 / (class_counts[0] + 1))
+    sampler = torch.utils.data.WeightedRandomSampler(
+        weights=torch.DoubleTensor(sample_weights),
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+        train_dataset, batch_size=batch_size, sampler=sampler, drop_last=True)
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=batch_size, shuffle=False)
 
@@ -307,6 +317,12 @@ def train_model(model, X_train, y_train, X_val, y_val,
             if len(batch_y.shape) == 1:
                 batch_y = batch_y.view(-1, 1)
             loss = criterion(outputs, batch_y)
+
+            # Degenerate penalty: tahminler tek sinifa yakinsa ceza
+            probs_batch = torch.sigmoid(outputs)
+            mean_prob = probs_batch.mean()
+            degen_penalty = 0.5 * (mean_prob - 0.5).pow(2)
+            loss = loss + degen_penalty
 
             optimizer.zero_grad()
             loss.backward()
@@ -558,23 +574,24 @@ def split_with_purging(X, y, train_ratio=0.70, val_ratio=0.15):
 
 def main(ticker="BTC-USD"):
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    x_path = os.path.join(base_dir, 'data', 'processed', f'{ticker}_X_windows.npy')
-    y_path = os.path.join(base_dir, 'data', 'processed', f'{ticker}_y_targets.npy')
 
-    if not os.path.exists(x_path):
-        print(f"Hata: {ticker}_X_windows.npy bulunamadı. Önce data_pipeline.py çalıştırın.")
+    from src.data.feature_store import FeatureStore
+    try:
+        store = FeatureStore(ticker)
+    except FileNotFoundError as e:
+        print(f"Hata: {e}")
         return
 
-    X = np.load(x_path, allow_pickle=True).astype(np.float32)
-    y = np.load(y_path, allow_pickle=True).astype(np.float32)
+    print(f"\n{'=' * 70}")
+    print(f"  {ticker} LSTM/GRU Egitimi (Unified FeatureStore + Anti-Degenerate)")
+    print(f"{'=' * 70}")
+    print(f"  {store.summary()}")
 
-    print(f"\n{'═' * 70}")
-    print(f"  {ticker} LSTM/GRU Eğitimi (DÜZELTİLMİŞ — Purging + 3-Way Split)")
-    print(f"{'═' * 70}")
-    print(f"  Veri boyutu: X={X.shape}, y={y.shape}")
-
-    # ── DÜZELTİLDİ: 3-yollu split (purging ile) ──
-    X_train, y_train, X_val, y_val, X_test, y_test = split_with_purging(X, y)
+    # ── Unified split (FeatureStore — tum modeller ayni bolumu kullanir) ──
+    X_train, y_train = store.get_lstm_split("train")
+    X_val, y_val = store.get_lstm_split("val")
+    X_test, y_test = store.get_lstm_split("test")
+    print(f"\n  Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
 
     input_size = X_train.shape[2]
     # DÜZELTİLDİ: Daha küçük model — 1200 eğitim örneği için 128/2 çok büyüktü

@@ -2,53 +2,96 @@
 __pycache__/
 *.py[cod]
 *.pyo
+*.pyd
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
 
 # Virtual environments
 .venv/
 venv/
 env/
 
-# IDE
+# IDE / OS
 .vscode/
 .idea/
 .cursor/
 .claude/
 .agents/
-
-# Database
-*.db
-*.sqlite3
-
-# Logs
-*.log
-
-# Data files (büyük dosyalar — GitHub 100MB limiti)
-data/processed/*.npy
-data/processed/*.pkl
-data/raw/*.csv
-data/results/*.png
-
-# Saved models (büyük dosyalar)
-src/models/saved_models/*.pth
-src/models/saved_models/*.pkl
-src/rl/saved_agents/*.zip
-
-# OS files
 .DS_Store
 Thumbs.db
 ~$*
 
-# Office files (Sunumlar, Raporlar vs. GitHub'a gitmesin diye)
+# Streamlit / logs
+.streamlit/cache/
+*.log
+logs/
+outputs/logs/
+outputs/lstm_experiments/
+
+# Data
+data/processed/
+data/exported/
+data/results/
+data/raw/*_raw.csv
+data/raw/archive_*/
+data/ml/archive_*/
+*.db
+*.sqlite
+*.sqlite3
+
+# Model binaries - keep active production RF/XGB/LSTM files, ignore legacy/experiments
+src/models/saved_models/ml_experiments/
+src/models/saved_models/lstm_experiments/
+src/models/saved_models/*_ensemble_meta_model.pkl
+src/models/saved_models/*_gru_best.pth
+src/models/saved_models/*_lstm_best_old64.pth
+src/rl/saved_agents/
+outputs/models/
+
+# Archives / backups
+backup_models_*/
+archive_*/
+zip/
+*.rar
+*.7z
+proje_ciktilari.zip
+ai_dashboard.before_*.py
+ai_dashboard.current_before_*.py
+
+# Temporary analysis outputs
+analysis_output.txt
+analysis_v2_output.txt
+*_output.txt
+
+# Generated report artifacts
+reports/charts/
+reports/interactive/
+docs/_generate_pdf.py
+docs/_update_doc.py
+
+# Root office/PDF artifacts
 *.pptx
 *.docx
 *.pdf
+*.xlsx
 
-# Geçici / üretilmiş dosyalar
-reports/interactive/
-git_status_output.txt
-_generate_pdf.py
-_update_doc.py
-rapor_ilk8hafta.md
+# Keep small report outputs
+!outputs/
+!outputs/metrics/
+!outputs/metrics/*.json
+!outputs/charts/
+!outputs/charts/*.png
+
+# Local legacy / analysis files
+analysis_v2.py
+save_and_analyze.py
+legacy/
+
+# Local legacy / analysis files
+analysis_v2.py
+save_and_analyze.py
+legacy/

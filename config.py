@@ -1,6 +1,8 @@
 # ============================================================
 #  config.py  —  Proje Ayarları
 # ============================================================
+import os
+
 
 # ── Takip Edilecek Coinler ──────────────────────────────────
 SYMBOLS = {
@@ -60,6 +62,6 @@ PATTERN_LOOKBACK   = 5             # Pattern tespiti bakış periyodu
 DISPLAY_DAYS       = 1500          # Dashboard'da gösterilecek gün miktarı (veya len(df))
 
 # ── 6-11. Hafta: Model Ayarları ──────────────────────────────
-MODEL_DIR = "models"
-RL_MODEL_DIR = "rl_models"
+MODEL_DIR = os.path.join("src", "models", "saved_models")
+RL_MODEL_DIR = os.path.join("src", "rl", "saved_agents")
 

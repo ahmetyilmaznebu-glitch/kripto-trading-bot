@@ -1,0 +1,69 @@
+{
+  "ticker": "BTC-USD",
+  "created_at": "2026-06-05T13:34:29",
+  "window_size": 30,
+  "feature_columns": [
+    "log_return_1d",
+    "high_low_range",
+    "close_open_return",
+    "volume_change",
+    "rsi_14",
+    "macd_pct",
+    "macd_signal_pct",
+    "bb_position",
+    "bb_width",
+    "sma_ratio_20",
+    "ema_ratio_50",
+    "atr_pct",
+    "adx_14",
+    "stoch_k",
+    "obv_change",
+    "return_lag_5",
+    "return_lag_10",
+    "return_lag_20",
+    "volatility_20",
+    "momentum_10"
+  ],
+  "target_column": "direction",
+  "price_column": "close",
+  "direction_threshold": 0.0015,
+  "n_days_original": 3165,
+  "n_days_after_filter": 2964,
+  "dead_zone_removed": 201,
+  "n_samples": 2934,
+  "scaler_fit_rows": 2074,
+  "date_start": "2017-10-05",
+  "date_end": "2026-06-04",
+  "split_indices": {
+    "train": [
+      0,
+      2034
+    ],
+    "val": [
+      2048,
+      2483
+    ],
+    "test": [
+      2497,
+      2934
+    ]
+  },
+  "class_balance": {
+    "train": {
+      "up": 1043,
+      "down": 991,
+      "total": 2034
+    },
+    "val": {
+      "up": 236,
+      "down": 199,
+      "total": 435
+    },
+    "test": {
+      "up": 215,
+      "down": 222,
+      "total": 437
+    }
+  },
+  "version": 3
+}

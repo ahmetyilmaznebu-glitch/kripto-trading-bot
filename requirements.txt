@@ -1,38 +1,29 @@
-# ============================================================
-#  requirements.txt
-#  Kripto Para Trading Botu — 1-5. Hafta Bağımlılıkları
-# ============================================================
+# ==============================================================================
+#  requirements.txt — Kripto Para Karar Destek Sistemi
+#  Ahmet Yılmaz | Near East University
+# ==============================================================================
 
-# ── 1. Hafta: Veri Toplama ──────────────────────────────────
-requests>=2.31.0        # HTTP istekleri (Binance & CoinGecko API)
-pandas-datareader>=0.10.0  # Yahoo Finance & alternatif veri kaynakları
-python-binance>=1.0.17  # Binance API (kripto para verileri)
+# ── 1. Veri Toplama & API Bağlantıları ────────────────────────────────────────
+requests>=2.31.0          # HTTP API istekleri (Binance & CoinGecko REST)
+yfinance>=0.2.0           # Yahoo Finance verileri (Birincil veri kaynağı)
+python-binance>=1.0.17    # Binance API client (Fallback veri kaynağı)
 
-# ── 2. Hafta: Veri Önişleme & Teknik Göstergeler ────────────
-pandas>=2.1.0           # Veri önişleme, DataFrame işlemleri
-numpy>=1.26.0           # Sayısal hesaplamalar, gösterge formülleri
+# ── 2. Veri İşleme & Analiz ───────────────────────────────────────────────────
+pandas>=2.1.0             # Veri manipülasyonu ve önişleme
+numpy>=1.26.0             # Matematiksel ve matris işlemleri
+ta>=0.11.0                # Teknik analiz göstergeleri (RSI, MACD, BB vb.)
 
-# ── 3. Hafta: Sinyal Üretimi & Görselleştirme ───────────────
-matplotlib>=3.8.0       # Grafik ve dashboard oluşturma
+# ── 3. Makine Öğrenmesi & Derin Öğrenme ───────────────────────────────────────
+scikit-learn>=1.3.0       # Sınıflandırıcılar (Random Forest) ve metrikler
+xgboost>=2.0.0            # Gradient Boosting sınıflandırıcı
+torch>=2.0.0              # LSTM/GRU Yapay Sinir Ağları (PyTorch)
+joblib>=1.3.0             # Model kaydetme ve yükleme işlemleri
 
-# ── 4. Hafta: Özellik Mühendisliği ──────────────────────────
-# (pandas ve numpy yeterli — ek bağımlılık gerekmiyor)
+# ── 4. Arayüz & Görselleştirme ────────────────────────────────────────────────
+streamlit>=1.28.0         # Karar destek web dashboard'u
+plotly>=5.18.0            # İnteraktif grafikler ve ısı haritaları
+matplotlib>=3.8.0         # Statik grafik çizimleri ve backtest çıktıları
 
-# ── 5. Hafta: İnteraktif Dashboard & Feature Importance ─────
-plotly>=5.18.0          # İnteraktif grafikler ve dashboard
-scikit-learn>=1.3.0     # Feature importance (mutual information)
-
-# İlerideki haftalar için (şimdilik kurmaya gerek yok):
-joblib>=1.3.0          # 8-9. Hafta: Model serileştirme
-tensorflow>=2.14.0     # 6-7. Hafta: LSTM modeli
-xgboost>=2.0.0         # 9. Hafta: XGBoost sınıflandırıcı
-backtrader>=1.9.78     # 12. Hafta: Backtesting
-streamlit>=1.28.0      # 14. Hafta: Web dashboard
-
-# Deep RL için:
-stable-baselines3>=2.0.0  # PPO/DQN modelleri
-gymnasium>=0.29.0         # Custom Trading Environment
-yfinance>=0.2.0           # Fiyat verisi çekmek için
-ta>=0.11.0                # Teknik indikatörler için
-torch>=2.0.0              # Derin Öğrenme modelleri (LSTM/GRU)
-
+# ── 5. Deneysel Pekiştirmeli Öğrenme ──────────────────────────────────────────
+# RL bağımlılıkları ana pipeline için gerekli DEĞİLDİR.
+# RL deneyleri için: pip install -r requirements-rl.txt

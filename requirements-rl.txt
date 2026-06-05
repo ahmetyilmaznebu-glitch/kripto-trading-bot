@@ -1,0 +1,15 @@
+# ==============================================================================
+#  requirements-rl.txt — Deneysel RL Bağımlılıkları
+#  Kripto Para Karar Destek Sistemi | Ahmet Yılmaz
+# ==============================================================================
+# Bu dosya SADECE pekiştirmeli öğrenme (RL) deneylerini çalıştırmak
+# istiyorsanız gereklidir. Ana pipeline (src/pipeline.py) bu
+# paketlere ihtiyaç DUYMAZ.
+#
+# Kurulum:
+#   pip install -r requirements.txt          # önce ana bağımlılıklar
+#   pip install -r requirements-rl.txt       # sonra RL eklentileri
+# ==============================================================================
+
+stable-baselines3>=2.0.0  # PPO ve DQN algoritmaları
+gymnasium>=0.29.0         # Pekiştirmeli öğrenme simülasyon ortamı

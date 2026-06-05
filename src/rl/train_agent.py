@@ -1,3 +1,15 @@
+"""
+train_agent.py — Deneysel PPO/RL Ajan Egitimi
+================================================================
+⚠️  DENEYSEL (EXPERIMENTAL) — Ana pipeline'in parcasi DEGILDIR.
+
+Bu modul pekistirmeli ogrenme (Reinforcement Learning) ile trading
+ajan egitimi icin tasarlanmistir. Ana karar mekanizmasi olarak
+Weighted Hybrid modeli (src/models/weighted_hybrid.py) kullanilir.
+
+RL modulu, arastirma / deney amaclidir ve ana akis (src/pipeline.py)
+tarafindan cagrilmaz.
+"""
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -13,7 +25,10 @@ _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from src.models.meta_inference import compute_meta_probs, WINDOW_SIZE
+from src.models.meta_inference import compute_final_probs
+
+# Geriye uyumluluk: eski WINDOW_SIZE sabiti
+WINDOW_SIZE = 60
 
 class TradingEnv(gym.Env):
     """
@@ -188,29 +203,30 @@ class TradingEnv(gym.Env):
 
     def _compute_reward(self, action, prev_net_worth):
         """
-        Risk-adjusted reward fonksiyonu.
+        Risk-adjusted reward fonksiyonu (v2 — log-return bazli).
         
-        Bilesenleri:
-        1. PnL (kar/zarar)
-        2. Drawdown cezasi
-        3. Asiri trading cezasi
+        Degisiklikler:
+        - PnL yerine log-return kullanilir (bull/bear bias azaltir)
+        - Entropy-bazli cesitlilik cezasi (buy-only davranisi onler)
         """
-        pnl = self.net_worth - prev_net_worth
-        
-        # 1. Normalize PnL
-        pnl_reward = pnl / (self.initial_balance * 0.01)  # %1 = 1.0 reward
+        # 1. Log-return bazli reward (bull/bear fark etmez)
+        if prev_net_worth > 0 and self.net_worth > 0:
+            log_ret = np.log(self.net_worth / prev_net_worth)
+            pnl_reward = log_ret * 100  # olcekleme
+        else:
+            pnl_reward = 0.0
         
         # 2. Drawdown cezasi
         if self.max_net_worth > 0:
             drawdown = (self.max_net_worth - self.net_worth) / self.max_net_worth
-            dd_penalty = -drawdown * 2.0  # Drawdown ne kadar buyukse ceza o kadar agir
+            dd_penalty = -drawdown * 2.0
         else:
             dd_penalty = 0
         
         # 3. Asiri trading cezasi (hold disindaki her islem kucuk ceza)
         trade_penalty = -0.001 if action != 1 else 0.0
         
-        # 4. Sharpe-benzeri normalizasyon (volatiliteye gore ayarla)
+        # 4. Sharpe-benzeri normalizasyon
         if len(self.recent_returns) > 5:
             returns_std = np.std(list(self.recent_returns)) + 1e-8
             sharpe_bonus = pnl_reward / returns_std * 0.1
@@ -219,18 +235,22 @@ class TradingEnv(gym.Env):
         
         total_reward = pnl_reward + dd_penalty + trade_penalty + sharpe_bonus
         
-        # 5. Aksiyon cesitliligi cezasi
-        # Eger ajan hic satis yapmiyorsa (buy-and-hold), ceza ver.
-        # Esik %5 olarak guclendirildi (0.02->0.05), ceza -0.15'e artirildi.
-        # Erken devreye girmesi icin 50->20 adim esigi dusuruldu.
+        # 5. Entropy-bazli aksiyon cesitliligi cezasi
+        # Monoton davranis (sadece AL veya sadece TUT) cezalandirilir
         if self.total_steps_taken > 20:
-            sell_ratio = self.action_counts[0] / (self.total_steps_taken + 1e-8)
-            if sell_ratio < 0.05:  # %5'ten az satis yapilmissa
-                total_reward -= 0.15
+            recent_n = min(self.total_steps_taken, 50)
+            counts = np.array([self.action_counts.get(i, 0) for i in range(3)], dtype=float)
+            counts = counts / (counts.sum() + 1e-8)
+            # Entropy hesapla: yuksek entropy = cesitli aksiyonlar
+            entropy = -sum(p * np.log(p + 1e-9) for p in counts)
+            max_entropy = np.log(3)
+            # Dusuk entropy = monoton davranis = buyuk ceza
+            diversity_penalty = -0.3 * (1.0 - entropy / max_entropy)
+            total_reward += diversity_penalty
         
         # 6. Cok uzun suredir ayni pozisyonda kalma cezasi
-        if self.position_duration > 100:
-            total_reward -= 0.01 * (self.position_duration - 100) / 100
+        if self.position_duration > 50:
+            total_reward -= 0.02 * (self.position_duration - 50) / 50
         
         return float(np.clip(total_reward, -10, 10))
 
@@ -307,12 +327,22 @@ class TradingEnv(gym.Env):
 
 def train_rl_agent(ticker="BTC-USD"):
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    print(f"\n--- {ticker} Ensemble meta-model olasilikleri hesaplaniyor (RL icin) ---")
-    # DUZELTME (Hata #4): compute_meta_probs artik 3 deger donduruyor
-    meta_probs, df_scaled, df_original = compute_meta_probs(base_dir, ticker=ticker)
+    print(f"\n--- {ticker} Weighted Hybrid olasiliklari hesaplaniyor (RL icin) ---")
+    # compute_final_probs: Weighted Hybrid formulu ile final olasilik
+    meta_probs, _closes, _component_info = compute_final_probs(ticker, split_name="test")
 
-    # DUZELTME (Hata #4): Orijinal (olceklenmemis) fiyatlari kullan
-    # Boylece 10000$ baslangic bakiyesi gercekci bir simülasyon olur
+    # Orijinal fiyat verilerini yukle (RL ortami icin)
+    import pandas as pd
+    raw_path = os.path.join(base_dir, "data", "raw", f"{ticker}_ohlcv.csv")
+    alt_path = os.path.join(base_dir, "data", "raw", f"{ticker}_raw.csv")
+    if os.path.exists(raw_path):
+        df_original = pd.read_csv(raw_path, index_col=0, parse_dates=True)
+    elif os.path.exists(alt_path):
+        df_original = pd.read_csv(alt_path, index_col=0, parse_dates=True)
+    else:
+        raise FileNotFoundError(f"Ham veri bulunamadi: {raw_path}")
+
+    # Orijinal (olceklenmemis) fiyatlari kullan — gercekci simulasyon icin
     df_for_env = df_original
     closes = df_for_env['Close'].values
     num_windows = len(meta_probs)
@@ -345,7 +375,7 @@ def train_rl_agent(ticker="BTC-USD"):
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.10,  # Kesfetme tesvik bonusu: 0.10 ile SAT aksiyonunu zorlar (0.05->0.10)
+        ent_coef=0.15,  # Kesfetme tesvik bonusu: 0.15 ile cesitli aksiyonlari zorlar (0.10->0.15)
     )
     model.learn(total_timesteps=500000)
     

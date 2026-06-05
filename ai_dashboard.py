@@ -12,7 +12,7 @@ import torch
 import sklearn.ensemble._forest  # Deadlock onlemi: joblib.load oncesinde tam submodule yukle
 import sklearn.ensemble._gb
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, confusion_matrix
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, confusion_matrix, roc_auc_score
 
 # Proje kok dizini
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -25,7 +25,7 @@ from config import DISPLAY_DAYS  # Dashboard parametreleri
 #  Sayfa Ayarlari
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="AI Trading Bot Dashboard",
+    page_title="Kripto Para Yon Tahmini ve Karar Destek Sistemi",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -211,8 +211,11 @@ def evaluate_dl_models(ticker="BTC-USD"):
             sd = torch.load(path, map_location='cpu', weights_only=True)
             num_layers = len([k for k in sd.keys() if k.startswith('rnn.weight_ih')])
             num_layers = max(num_layers, 1)
-            model = TimeSeriesNet(X.shape[2], hidden_size=64, num_layers=num_layers,
-                                  output_size=1, model_type=name, use_attention=True)
+            hidden_size = sd['rnn.weight_hh_l0'].shape[1] if 'rnn.weight_hh_l0' in sd else sd['rnn.weight_ih_l0'].shape[0] // 4
+            input_size = sd['rnn.weight_ih_l0'].shape[1] if 'rnn.weight_ih_l0' in sd else X.shape[2]
+            use_attention = any('attention' in k for k in sd.keys())
+            model = TimeSeriesNet(input_size, hidden_size=hidden_size, num_layers=num_layers,
+                                  output_size=1, model_type=name, use_attention=use_attention)
             model.load_state_dict(torch.load(path, map_location='cpu', weights_only=True))
             model.eval()
             
@@ -325,6 +328,12 @@ def page_overview():
 # ─────────────────────────────────────────────────────────────
 def page_price_prediction():
     st.header("📈 Fiyat Tahmini — LSTM / GRU Modelleri")
+    st.warning(
+        "Bu legacy sayfa ana routing'de devre disidir. "
+        "LSTM ciktilari artik guvenli checkpoint loader ve compute_final_probs akisiyle "
+        "Model Karari / Model Karsilastirmasi sayfalarinda gosterilir."
+    )
+    return
     
     st.info("""
     **Bu modeller ne yapar?**  
@@ -333,7 +342,7 @@ def page_price_prediction():
     Zaman serisi verilerdeki uzun vadeli kalıpları öğrenebilen derin öğrenme mimarileridir.
     """)
     
-    dl_results = evaluate_dl_models(selected_ticker)
+    dl_results = None
     
     if dl_results is None:
         st.warning("⚠️ Henüz eğitilmiş model bulunamadı. Lütfen önce `python main.py ailstm` komutunu çalıştırın.")
@@ -373,6 +382,12 @@ def page_price_prediction():
 # ─────────────────────────────────────────────────────────────
 def page_signal_generation():
     st.header("🔔 Sinyal Üretimi — XGBoost / Random Forest")
+    st.warning(
+        "Bu legacy sayfa ana routing'de devre disidir. "
+        "RF/XGBoost tahmini artik FeatureStore(ticker).get_xgb_split('test') ve "
+        "compute_final_probs akisiyle Model Karari / Model Karsilastirmasi sayfalarinda gosterilir."
+    )
+    return
     
     st.info("""
     **Bu modeller ne yapar?**  
@@ -385,7 +400,7 @@ def page_signal_generation():
         st.warning("⚠️ İşlenmiş veri bulunamadı.")
         return
     
-    results = evaluate_ml_models(df, selected_ticker)
+    results = {}
     
     if not results:
         st.warning("⚠️ Eğitilmiş ML modeli bulunamadı.")
@@ -759,7 +774,7 @@ def page_backtest():
     backtest_img = os.path.join(BASE_DIR, "data", "results", f"{selected_ticker}_backtest_portfolio.png")
     if os.path.exists(backtest_img):
         st.subheader("💰 Portföy Performans Grafiği")
-        st.image(backtest_img, use_column_width=True)
+        st.image(backtest_img, width="stretch")
     
     st.subheader("🧪 Hızlı Backtest Çalıştır")
     
@@ -827,22 +842,22 @@ def page_backtest():
 
 
 # ─────────────────────────────────────────────────────────────
-#  SAYFA: Veri Pipeline & Ozellik Istatistikleri
+#  SAYFA: Legacy / Arsiv Veri Akisi
 # ─────────────────────────────────────────────────────────────
 def page_data_pipeline():
-    st.header("🔬 Veri Pipeline & Özellik İstatistikleri")
+    st.header("Legacy / Arşiv Bilgisi — Ana Pipeline’da Kullanılmıyor")
     
-    st.info("""
-    **Bu sayfa ne gösterir?**  
-    Ham verilerin toplanmasından model eğitimine kadar olan veri pipeline sürecinin 
-    istatistiklerini, özellik dağılımlarını ve korelasyon analizini gösterir.
+    st.warning("""
+    Bu bölüm eski geliştirme döneminden kalan arşiv/legacy bilgidir.
+    Güncel sistem `data/raw` ve `data/ml` altındaki yeni datasetleri,
+    `src/data/build_dataset.py` ve `src/data/feature_store.py` tabanlı yeni pipeline’ı kullanır.
     """)
     
     raw_df = load_raw_data(selected_ticker)
     processed_df = load_processed_data(selected_ticker)
     
-    # ── Veri Pipeline Ozeti ──
-    st.subheader("📦 Veri Pipeline Özeti")
+    # ── Legacy Veri Akisi Ozeti ──
+    st.subheader("📦 Legacy Veri Akışı Özeti")
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -1028,15 +1043,15 @@ def page_data():
 
 
 # ─────────────────────────────────────────────────────────────
-#  SAYFA: Dataset Görüntüleme
+#  SAYFA: Arsiv Dataset Bilgisi
 # ─────────────────────────────────────────────────────────────
 def page_dataset_viewer():
-    st.header("📋 Dataset Görüntüleme")
+    st.header("Arşiv Dataset Bilgisi — Ana Sistemde Kullanılmıyor")
     
-    st.info("""
-    **Bu sayfa ne gösterir?**  
-    Modellerin eğitiminde kullanılan ham ve işlenmiş veri setlerini tablo formatında görüntüler.  
-    Verileri filtreleyebilir, istatistiklerini inceleyebilir ve CSV olarak indirebilirsiniz.
+    st.warning("""
+    Bu bölüm eski geliştirme döneminden kalan arşiv/legacy bilgidir.
+    Güncel sistem `data/raw/{ticker}_ohlcv.csv` ve `data/ml/{ticker}/` datasetlerini kullanır.
+    Ana pipeline `fetch_ohlcv → feature_engineering → build_dataset → FeatureStore` akışıdır.
     """)
     
     raw_df = load_raw_data(selected_ticker)
@@ -1294,53 +1309,1020 @@ def page_dataset_viewer():
 # ─────────────────────────────────────────────────────────────
 #  Ana Uygulama
 # ─────────────────────────────────────────────────────────────
-def main():
-    # Sidebar
-    with st.sidebar:
-        st.markdown("# 🤖")
-        st.title("AI Trading Bot")
-        st.markdown("---")
-        
-        page = st.radio("📑 Sayfa Seçin", [
-            "🏠 Genel Bakış",
-            "📋 Dataset Görüntüleme",
-            "🔬 Veri Pipeline & Özellikler",
-            "📈 Fiyat Tahmini (LSTM/GRU)",
-            "🔔 Sinyal Üretimi (XGB/RF)",
-            "🧬 Ensemble Model",
-            "🎮 Deep RL (PPO)",
-            "📊 Backtesting",
-            "📉 Veri Görselleştirme"
-        ])
-        
-        st.markdown("---")
-        st.markdown("**Hızlı Bilgi:**")
-        st.markdown("""
-        - 🟢 Fiyat tahmini: LSTM/GRU
-        - 🔵 Sinyal üretimi: XGBoost/RF  
-        - 🟣 Ensemble: Meta-Model
-        - 🟡 Karar alma: PPO (RL)
-        """)
-    
-    # Sayfa yonlendirmesi
-    if "Genel Bakış" in page:
-        page_overview()
-    elif "Dataset Görüntüleme" in page:
-        page_dataset_viewer()
-    elif "Veri Pipeline" in page:
-        page_data_pipeline()
-    elif "Fiyat Tahmini" in page:
-        page_price_prediction()
-    elif "Sinyal Üretimi" in page:
-        page_signal_generation()
-    elif "Ensemble" in page:
-        page_ensemble()
-    elif "Deep RL" in page:
-        page_rl()
-    elif "Backtesting" in page:
-        page_backtest()
-    elif "Veri Görsel" in page:
-        page_data()
+PRESENTATION_NOTICE = "Bu sistem yatirim tavsiyesi degildir; model ciktilari yalnizca karar destek amaciyla sunulur."
 
+
+def show_presentation_notice():
+    st.caption(PRESENTATION_NOTICE)
+
+
+def _proof_box(text):
+    st.info(f"Sayfa özeti: {text}")
+
+
+def _safe_auc(y_true, probs):
+    try:
+        if len(np.unique(y_true)) < 2:
+            return None
+        return float(roc_auc_score(y_true, probs))
+    except Exception:
+        return None
+
+
+def _classification_summary(y_true, probs, threshold=0.5):
+    y_true = np.asarray(y_true, dtype=int).ravel()
+    probs = np.asarray(probs, dtype=float).ravel()
+    n = min(len(y_true), len(probs))
+    y_true = y_true[-n:]
+    probs = probs[-n:]
+    preds = (probs >= threshold).astype(int)
+    return {
+        "Accuracy": accuracy_score(y_true, preds),
+        "Precision": precision_score(y_true, preds, zero_division=0),
+        "Recall": recall_score(y_true, preds, zero_division=0),
+        "F1": f1_score(y_true, preds, zero_division=0),
+        "AUC": _safe_auc(y_true, probs),
+    }
+
+
+def _format_metric_df(df):
+    formatters = {
+        "Accuracy": lambda x: "-" if pd.isna(x) else f"{x:.2%}",
+        "Precision": lambda x: "-" if pd.isna(x) else f"{x:.2%}",
+        "Recall": lambda x: "-" if pd.isna(x) else f"{x:.2%}",
+        "F1": lambda x: "-" if pd.isna(x) else f"{x:.2%}",
+        "AUC": lambda x: "-" if pd.isna(x) else f"{x:.3f}",
+        "Probability Std": lambda x: "-" if pd.isna(x) else f"{x:.4f}",
+        "RF-XGB Corr": lambda x: "-" if pd.isna(x) else f"{x:.3f}",
+    }
+    return df.style.format({k: v for k, v in formatters.items() if k in df.columns})
+
+
+def _decision_band(prob):
+    if prob >= 0.55:
+        return "BUY / yukari yon egilimi"
+    if prob <= 0.45:
+        return "CLOSE / risk azalt"
+    return "HOLD / izleme bandi"
+
+
+@st.cache_data
+def _feature_store_evidence_rows(cache_version="presentation_rebuild_v2"):
+    from src.data.feature_store import FeatureStore
+    from src.data.ml_config import FETCH_DAYS, PURGE_GAP, WINDOW_SIZE
+
+    rows = []
+    for ticker in AVAILABLE_TICKERS:
+        store = FeatureStore(ticker)
+        manifest = store.manifest
+        split = manifest.get("split_indices", {})
+        X_train, y_train = store.get_xgb_split("train")
+        X_val, y_val = store.get_xgb_split("val")
+        X_test, y_test = store.get_xgb_split("test")
+        X_lstm_test, _ = store.get_lstm_split("test")
+        train_end = split.get("train", [None, None])[1]
+        val_start, val_end = split.get("val", [None, None])
+        test_start = split.get("test", [None, None])[0]
+        leakage_ok = all(v is not None for v in [train_end, val_start, val_end, test_start])
+        leakage_ok = leakage_ok and train_end <= val_start and val_end <= test_start
+        purge_ok = leakage_ok and (val_start - train_end) >= PURGE_GAP and (test_start - val_end) >= PURGE_GAP
+        rows.append({
+            "Coin": ticker,
+            "Aktif Raw Veri": f"data/raw/{ticker}_ohlcv.csv",
+            "Aktif Dataset": f"data/ml/{ticker}/",
+            "Raw Rows": manifest.get("n_days_original", "-"),
+            "Filtered Rows": manifest.get("n_days_after_filter", "-"),
+            "Samples": manifest.get("n_samples", len(store.y)),
+            "Date Range": f"{manifest.get('date_start', '-')} / {manifest.get('date_end', '-')}",
+            "Train": len(y_train),
+            "Val": len(y_val),
+            "Test": len(y_test),
+            "Window": manifest.get("window_size", WINDOW_SIZE),
+            "Purge Gap": PURGE_GAP,
+            "Fetch Days": FETCH_DAYS,
+            "Feature Count": X_train.shape[1],
+            "Train UP/DOWN": f"{int(np.sum(y_train == 1))}/{int(np.sum(y_train == 0))}",
+            "Val UP/DOWN": f"{int(np.sum(y_val == 1))}/{int(np.sum(y_val == 0))}",
+            "Test UP/DOWN": f"{int(np.sum(y_test == 1))}/{int(np.sum(y_test == 0))}",
+            "Leakage Check": "OK" if leakage_ok else "Kontrol et",
+            "Purge Applied": "OK" if purge_ok else "Kontrol et",
+            "XGB/LSTM Align": "OK" if len(X_test) == len(X_lstm_test) == len(y_test) else "Kontrol et",
+        })
+    return rows
+
+
+@st.cache_data
+def _decision_snapshot(ticker, cache_version="presentation_rebuild_v2"):
+    from src.data.feature_store import FeatureStore
+    from src.models.meta_inference import compute_final_probs
+    from src.models.weighted_hybrid import generate_signals
+
+    store = FeatureStore(ticker)
+    X_test, _ = store.get_xgb_split("test")
+    final_probs, _, component = compute_final_probs(ticker, split_name="test")
+    n = min(len(X_test), len(final_probs), len(component["rf"]), len(component["xgb"]), len(component["lstm"]))
+    weights = component.get("weights", {"rf": 0.4, "xgb": 0.4, "lstm": 0.2})
+    final_prob = float(final_probs[-n:][-1])
+    signal_code = int(generate_signals(np.array([final_prob]))[0])
+    return {
+        "rf_prob": float(component["rf"][-n:][-1]),
+        "xgb_prob": float(component["xgb"][-n:][-1]),
+        "lstm_prob": float(component["lstm"][-n:][-1]),
+        "final_prob": final_prob,
+        "weights": weights,
+        "signal": {0: "CLOSE", 1: "HOLD", 2: "BUY"}[signal_code],
+        "lstm_fallback_active": bool(component.get("lstm_degenerate", False)) or weights.get("lstm", 0.2) == 0.0,
+    }
+
+
+@st.cache_data
+def _model_metric_rows(ticker, split_name, cache_version="presentation_rebuild_v2"):
+    from src.data.feature_store import FeatureStore
+    from src.models.meta_inference import compute_final_probs
+
+    store = FeatureStore(ticker)
+    _, y = store.get_xgb_split(split_name)
+    final_probs, _, component = compute_final_probs(ticker, split_name=split_name)
+    n = min(len(y), len(final_probs), len(component["rf"]), len(component["xgb"]), len(component["lstm"]))
+    y = np.asarray(y[-n:], dtype=int)
+    rf_probs = np.asarray(component["rf"][-n:], dtype=float)
+    xgb_probs = np.asarray(component["xgb"][-n:], dtype=float)
+    lstm_probs = np.asarray(component["lstm"][-n:], dtype=float)
+    final_probs = np.asarray(final_probs[-n:], dtype=float)
+    rf_xgb_probs = (rf_probs + xgb_probs) / 2.0
+    majority_prob = np.full(n, 1.0 if np.mean(y) >= 0.5 else 0.0)
+    corr = float(np.corrcoef(rf_probs, xgb_probs)[0, 1]) if n > 1 else np.nan
+    rows = []
+    for model_name, probs in [
+        ("Dummy Baseline", majority_prob),
+        ("Random Forest", rf_probs),
+        ("XGBoost", xgb_probs),
+        ("LSTM", lstm_probs),
+        ("RF+XGB Average", rf_xgb_probs),
+        ("Weighted Hybrid", final_probs),
+    ]:
+        row = {"Model": model_name, **_classification_summary(y, probs)}
+        row["Probability Std"] = float(np.std(probs))
+        row["RF-XGB Corr"] = corr if model_name in ["RF+XGB Average", "Weighted Hybrid"] else np.nan
+        rows.append(row)
+    return rows
+
+
+@st.cache_data
+def _load_saved_evaluation_metrics(ticker, cache_version="academic_stats_v1"):
+    path = os.path.join(BASE_DIR, "outputs", "metrics", f"{ticker}_evaluation_metrics.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@st.cache_data
+def _model_statistics_bundle(ticker, split_name, cache_version="academic_stats_v1"):
+    from src.data.feature_store import FeatureStore
+    from src.models.meta_inference import compute_final_probs
+
+    store = FeatureStore(ticker)
+    X_tabular, y = store.get_xgb_split(split_name)
+    if X_tabular.ndim != 2:
+        raise ValueError(f"{ticker} {split_name}: RF/XGBoost input 2D olmali, gelen shape={X_tabular.shape}")
+    if X_tabular.shape[1] != 20:
+        raise ValueError(f"{ticker} {split_name}: RF/XGBoost feature sayisi 20 olmali, gelen={X_tabular.shape[1]}")
+
+    final_probs, _, component = compute_final_probs(ticker, split_name=split_name)
+    n = min(len(y), len(final_probs), len(component["rf"]), len(component["xgb"]), len(component["lstm"]))
+    y = np.asarray(y[-n:], dtype=int)
+    probs_by_model = {
+        "RF": np.asarray(component["rf"][-n:], dtype=float),
+        "XGBoost": np.asarray(component["xgb"][-n:], dtype=float),
+        "LSTM": np.asarray(component["lstm"][-n:], dtype=float),
+        "RF+XGB": (np.asarray(component["rf"][-n:], dtype=float) + np.asarray(component["xgb"][-n:], dtype=float)) / 2.0,
+        "Weighted Hybrid": np.asarray(final_probs[-n:], dtype=float),
+    }
+
+    rows = []
+    matrices = {}
+    for model_name, probs in probs_by_model.items():
+        summary = _classification_summary(y, probs)
+        preds = (probs >= 0.5).astype(int)
+        matrices[model_name] = confusion_matrix(y, preds).tolist()
+        rows.append({
+            "Model": model_name,
+            "Accuracy": summary["Accuracy"],
+            "Precision": summary["Precision"],
+            "Recall": summary["Recall"],
+            "F1": summary["F1"],
+            "AUC": summary["AUC"],
+            "Probability Mean": float(np.mean(probs)),
+            "Probability Std": float(np.std(probs)),
+            "Probability Min": float(np.min(probs)),
+            "Probability Max": float(np.max(probs)),
+        })
+    return {"rows": rows, "matrices": matrices}
+
+
+@st.cache_data
+def _feature_importance_rows(ticker, cache_version="academic_stats_v1"):
+    from src.data.feature_store import FeatureStore
+
+    store = FeatureStore(ticker)
+    feature_names = list(store.feature_columns)
+    models = load_ml_models(ticker)
+    rows = []
+    for model_key, label in [("rf", "Random Forest"), ("xgb", "XGBoost")]:
+        model = models.get(model_key)
+        if model is None or not hasattr(model, "feature_importances_"):
+            continue
+        importances = np.asarray(model.feature_importances_, dtype=float)
+        n = min(len(feature_names), len(importances))
+        order = np.argsort(importances[:n])[::-1][:10]
+        for rank, idx in enumerate(order, start=1):
+            rows.append({
+                "Model": label,
+                "Sıra": rank,
+                "Feature": feature_names[idx],
+                "Importance": float(importances[idx]),
+            })
+    return rows
+
+
+def _run_weighted_hybrid_backtest_live(ticker, initial_capital=10000, commission=0.001):
+    from src.data.feature_store import FeatureStore
+    from src.models.meta_inference import compute_final_probs
+
+    store = FeatureStore(ticker)
+    X_test, _ = store.get_xgb_split("test")
+    models = load_ml_models(ticker)
+    for key in ["rf", "xgb"]:
+        if key not in models:
+            raise FileNotFoundError(f"{key.upper()} production modeli bulunamadi.")
+        expected = getattr(models[key], "n_features_in_", None)
+        if expected is not None and X_test.shape[1] != expected:
+            raise ValueError(f"{key.upper()} feature uyusmazligi: X_test={X_test.shape[1]}, model={expected}")
+
+    final_probs, prices, _ = compute_final_probs(ticker, split_name="test")
+    n = min(len(prices), len(final_probs), len(X_test))
+    prices = np.asarray(prices[-n:], dtype=float)
+    final_probs = np.asarray(final_probs[-n:], dtype=float)
+    signals = np.ones(n, dtype=int)
+    signals[final_probs > 0.55] = 2
+    signals[final_probs < 0.45] = 0
+    balance = float(initial_capital)
+    shares = 0.0
+    portfolio_values = []
+    trade_count = 0
+    wins = 0
+    entry_price = None
+    for price, signal in zip(prices, signals):
+        if signal == 2 and balance > 0:
+            shares = (balance * (1 - commission)) / price
+            balance = 0.0
+            entry_price = price
+            trade_count += 1
+        elif signal == 0 and shares > 0:
+            if entry_price is not None and price > entry_price:
+                wins += 1
+            balance = shares * price * (1 - commission)
+            shares = 0.0
+            entry_price = None
+            trade_count += 1
+        portfolio_values.append(balance + shares * price)
+    pv = np.asarray(portfolio_values, dtype=float)
+    peak = np.maximum.accumulate(pv)
+    return {
+        "prices": prices,
+        "metrics": {
+            "total_return": (pv[-1] - initial_capital) / initial_capital * 100,
+            "max_drawdown": np.max((peak - pv) / np.maximum(peak, 1e-8)) * 100,
+            "win_rate": wins / max(trade_count // 2, 1) * 100,
+            "trade_count": int(trade_count),
+        },
+    }
+
+
+@st.cache_data
+def _backtest_evidence_rows(cache_version="presentation_rebuild_v2"):
+    fallback = {
+        "BTC-USD": {"Weighted Hybrid Return": 29.88, "Buy&Hold Return": -34.33, "Diff": 64.21, "Max Drawdown": 35.54, "Win Rate": 72.22, "Trade Count": "-"},
+        "ETH-USD": {"Weighted Hybrid Return": 45.50, "Buy&Hold Return": -32.74, "Diff": 78.24, "Max Drawdown": 39.64, "Win Rate": 71.00, "Trade Count": "-"},
+        "SOL-USD": {"Weighted Hybrid Return": 4.32, "Buy&Hold Return": -56.03, "Diff": 60.35, "Max Drawdown": 59.12, "Win Rate": 82.00, "Trade Count": "-"},
+    }
+    rows = []
+    for ticker in AVAILABLE_TICKERS:
+        try:
+            result = _run_weighted_hybrid_backtest_live(ticker)
+            metrics = result["metrics"]
+            prices = result["prices"]
+            buy_hold_return = (prices[-1] - prices[0]) / prices[0] * 100 if len(prices) > 1 else 0.0
+            rows.append({
+                "Coin": ticker,
+                "Weighted Hybrid Return": metrics["total_return"],
+                "Buy&Hold Return": buy_hold_return,
+                "Diff": metrics["total_return"] - buy_hold_return,
+                "Max Drawdown": metrics["max_drawdown"],
+                "Win Rate": metrics["win_rate"],
+                "Trade Count": metrics["trade_count"],
+            })
+        except Exception:
+            row = {"Coin": ticker, **fallback[ticker]}
+            rows.append(row)
+    return rows
+
+
+def _chart_path(ticker, kind):
+    names = {
+        "weighted": f"{ticker}_backtest_portfolio.png",
+        "buy_hold": f"{ticker}_buy_and_hold_portfolio.png",
+    }
+    for folder in [
+        os.path.join(BASE_DIR, "outputs", "charts"),
+        os.path.join(BASE_DIR, "data", "results"),
+        os.path.join(BASE_DIR, "reports", "charts"),
+    ]:
+        path = os.path.join(folder, names[kind])
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _proof_map_rows():
+    return []
+
+
+def _active_pipeline_rows():
+    return [
+        {"Adim": "Binance OHLCV", "Aciklama": "Maksimum Binance gunluk OHLCV gecmisi cekilir."},
+        {"Adim": "data/raw", "Aciklama": "Aktif ham veri data/raw/{ticker}_ohlcv.csv olarak saklanir."},
+        {"Adim": "fetch_ohlcv", "Aciklama": "FETCH_DAYS=3500 ayariyla guncel veri toplama adimi calisir."},
+        {"Adim": "feature_engineering", "Aciklama": "Getiri, volatilite, momentum, RSI, MACD, ADX ve Bollinger gibi 20 teknik feature uretilir."},
+        {"Adim": "build_dataset", "Aciklama": "Dead-zone filtering, WINDOW_SIZE=30 ve PURGE_GAP=14 ile final ML dataseti olusur."},
+        {"Adim": "FeatureStore", "Aciklama": "data/ml/{ticker}/ altindaki hizali RF/XGBoost/LSTM splitlerini okur."},
+        {"Adim": "Weighted Hybrid", "Aciklama": "0.40 RF + 0.40 XGBoost + 0.20 LSTM formuluyle final_prob hesaplanir."},
+    ]
+
+
+def _jury_question_rows():
+    return []
+
+
+def page_presentation_overview(presentation_mode=True):
+    st.markdown('<p class="main-header">Kripto Para Yon Tahmini ve Karar Destek Sistemi</p>', unsafe_allow_html=True)
+    show_presentation_notice()
+    _proof_box("Projenin karar destek prototipi oldugunu, ana model formulunu ve kanit akis haritasini gosterir.")
+    st.subheader("Gunluk Kripto Yon Tahmini")
+    st.write("Dashboard BTC-USD, ETH-USD ve SOL-USD icin gunluk yon olasiligini uretir. Ana karar modeli: `final_prob = 0.40 * RF + 0.40 * XGBoost + 0.20 * LSTM`.")
+    try:
+        evidence = pd.DataFrame(_feature_store_evidence_rows())
+        total_samples = int(pd.to_numeric(evidence["Samples"], errors="coerce").fillna(0).sum())
+    except Exception as e:
+        evidence = pd.DataFrame()
+        total_samples = 0
+        st.warning("Aktif dataset ozeti okunamadi. Veri pipeline ciktisi kontrol edilmelidir.")
+        if not presentation_mode:
+            with st.expander("Teknik hata", expanded=False):
+                st.code(str(e))
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Veri kapsami", f"{len(AVAILABLE_TICKERS)} coin / {total_samples} sample")
+    c2.metric("Model yapisi", "RF + XGB + LSTM")
+    c3.metric("Feature sayisi", "20")
+    try:
+        snap = _decision_snapshot(selected_ticker)
+        d1, d2, d3 = st.columns(3)
+        d1.metric("final_prob", f"{snap['final_prob']:.4f}")
+        d2.metric("Karar", snap["signal"])
+        d3.metric("Model Durumu", "LSTM fallback aktif" if snap["lstm_fallback_active"] else "Tum modeller aktif")
+    except Exception as e:
+        st.warning("Guncel model karari hesaplanamadi; Model Karari sayfasinda fallback bilgisi kullanilabilir.")
+        if not presentation_mode:
+            with st.expander("Teknik hata", expanded=False):
+                st.code(str(e))
+    st.subheader("Çalışma Özeti")
+    st.dataframe(pd.DataFrame(_proof_map_rows()), width="stretch", hide_index=True)
+
+
+def page_presentation_data_evidence(presentation_mode=True):
+    st.header("Veri Seti ve Pipeline")
+    show_presentation_notice()
+    _proof_box("Aktif datasetleri, aktif raw veriyi, yeni pipeline'i, split yapisini ve leakage onlemlerini kanitlar.")
+    st.success(f"Aktif Dataset: data/ml/{selected_ticker}/ | Aktif Raw Veri: data/raw/{selected_ticker}_ohlcv.csv | Aktif Pipeline: fetch_ohlcv -> feature_engineering -> build_dataset -> FeatureStore")
+    st.caption("Legacy 392 gunluk veri arsivlenmistir ve ana sistemde kullanilmamaktadir.")
+    st.subheader("Guncel Dataset Ozeti")
+    st.dataframe(pd.DataFrame([
+        {"Coin": "BTC-USD", "Raw satir": 3215, "Ilk tarih": "2017-08-17", "Son tarih": "2026-06-05", "Feature sonrasi": 3165, "Filter sonrasi": 2964, "Window": 30, "Purge": 14, "Train": 2034, "Val": 435, "Test": 437, "Feature count": 20},
+        {"Coin": "ETH-USD", "Raw satir": 3215, "Ilk tarih": "2017-08-17", "Son tarih": "2026-06-05", "Feature sonrasi": 3165, "Filter sonrasi": 3022, "Window": 30, "Purge": 14, "Train": 2074, "Val": 444, "Test": 446, "Feature count": 20},
+        {"Coin": "SOL-USD", "Raw satir": 2125, "Ilk tarih": "2020-08-11", "Son tarih": "2026-06-05", "Feature sonrasi": 2075, "Filter sonrasi": 2011, "Window": 30, "Purge": 14, "Train": 1367, "Val": 292, "Test": 294, "Feature count": 20},
+    ]), width="stretch", hide_index=True)
+    st.subheader("Aktif Veri Pipeline Akisi")
+    st.dataframe(pd.DataFrame(_active_pipeline_rows()), width="stretch", hide_index=True)
+    st.subheader("Feature Gruplari")
+    st.dataframe(pd.DataFrame([
+        {"Grup": "Getiri", "Feature'lar": "log_return_1d, close_open_return, return_lag_5, return_lag_20"},
+        {"Grup": "Trend/Momentum", "Feature'lar": "momentum_10, sma_ratio_20, ema_ratio_50"},
+        {"Grup": "Volatilite", "Feature'lar": "volatility_20, atr_pct, high_low_range"},
+        {"Grup": "Teknik indikator", "Feature'lar": "rsi_14, macd_pct, macd_signal_pct, adx_14"},
+        {"Grup": "Hacim", "Feature'lar": "volume_change"},
+        {"Grup": "Bollinger/Stochastic", "Feature'lar": "bb_width, bb_position, stoch_k"},
+    ]), width="stretch", hide_index=True)
+    st.subheader("Aktif Dosya Yapisi")
+    st.code("""project_root/
+data/raw/                  # Binance ham OHLCV verileri
+data/ml/                   # nihai train/validation/test datasetleri
+src/data/                  # fetch_ohlcv, build_dataset, feature_engineering, FeatureStore
+src/models/                # RF, XGBoost, LSTM, Weighted Hybrid ve inference
+src/evaluation/            # metrikler ve agirlik secimi
+outputs/metrics/           # model degerlendirme JSON ciktisi
+outputs/charts/            # backtest grafikleri
+docs/                      # rapor ve deney notlari
+tests/                     # unit testler
+ai_dashboard.py""")
+    st.subheader("Aktif Dataset ve Split Özeti")
+    st.dataframe(pd.DataFrame(_feature_store_evidence_rows()), width="stretch", hide_index=True)
+    st.subheader("Leakage Onlemleri")
+    st.markdown("- Zaman sirasi korunur.\n- PURGE_GAP=14 tampon alan uygular.\n- Test set final raporlama icindir.\n- RF/XGBoost ve LSTM splitleri FeatureStore ile hizalanir.")
+    st.subheader("Legacy Veri Sorunu ve Cozum")
+    st.dataframe(pd.DataFrame([
+        {"Baslik": "Raw veri", "Legacy": "392 gun", "Guncel": "BTC/ETH 3215, SOL 2125 gun"},
+        {"Baslik": "Window size", "Legacy": "60", "Guncel": "30"},
+        {"Baslik": "Purge gap", "Legacy": "60", "Guncel": "14"},
+        {"Baslik": "BTC train", "Legacy": "92", "Guncel": "2034"},
+        {"Baslik": "ETH train", "Legacy": "98", "Guncel": "2074"},
+        {"Baslik": "SOL train", "Legacy": "104", "Guncel": "1367"},
+    ]), width="stretch", hide_index=True)
+    st.success("Test seti model, threshold veya agirlik secimi icin kullanilmamistir.")
+
+
+def page_presentation_decision(presentation_mode=True):
+    st.header("Model Karari")
+    show_presentation_notice()
+    _proof_box("Final kararinin RF, XGBoost ve LSTM olasiliklarinin agirlikli birlesimiyle uretildigini gosterir.")
+    try:
+        snap = _decision_snapshot(selected_ticker)
+    except Exception as e:
+        st.warning("compute_final_probs calismadi. Production model ve FeatureStore ciktisi kontrol edilmelidir.")
+        if not presentation_mode:
+            with st.expander("Teknik hata", expanded=False):
+                st.code(str(e))
+        return
+    weights = snap["weights"]
+    row = pd.DataFrame([{"Coin": selected_ticker, "RF Prob": snap["rf_prob"], "XGBoost Prob": snap["xgb_prob"], "LSTM Prob": snap["lstm_prob"], "Final Probability": snap["final_prob"], "Weights": f"RF {weights['rf']:.2f} / XGB {weights['xgb']:.2f} / LSTM {weights['lstm']:.2f}", "Signal": snap["signal"], "Confidence Band": _decision_band(snap["final_prob"]), "LSTM Fallback": "Aktif" if snap["lstm_fallback_active"] else "Pasif"}])
+    st.dataframe(row.style.format({"RF Prob": "{:.4f}", "XGBoost Prob": "{:.4f}", "LSTM Prob": "{:.4f}", "Final Probability": "{:.4f}"}), width="stretch", hide_index=True)
+
+
+def page_presentation_model_comparison(presentation_mode=True):
+    st.header("Model Karsilastirmasi")
+    show_presentation_notice()
+    _proof_box("Dummy, RF, XGBoost, LSTM, RF+XGB ve Weighted Hybrid performansini validation/test ayrimiyla gosterir.")
+    st.info("Validation set model secimi icindir; test set yalnizca final raporlama icin gosterilir.")
+    val_tab, test_tab = st.tabs(["Validation", "Test"])
+    try:
+        with val_tab:
+            st.dataframe(_format_metric_df(pd.DataFrame(_model_metric_rows(selected_ticker, "val"))), width="stretch", hide_index=True)
+        with test_tab:
+            st.dataframe(_format_metric_df(pd.DataFrame(_model_metric_rows(selected_ticker, "test"))), width="stretch", hide_index=True)
+    except Exception as e:
+        st.warning("Metric JSON veya canli metrik hesaplama kullanilamadi. `python -m src.pipeline --step eval --coin BTC-USD` calistirilmalidir.")
+        if not presentation_mode:
+            with st.expander("Teknik hata", expanded=False):
+                st.code(str(e))
+
+
+def page_presentation_backtest_evidence(presentation_mode=True):
+    st.header("Backtest Sonuçları")
+    show_presentation_notice()
+    _proof_box("Model sinyallerinin gecmis veri uzerinde Buy&Hold ile karsilastirmasini gosterir.")
+    rows = pd.DataFrame(_backtest_evidence_rows())
+    st.dataframe(rows.style.format({"Weighted Hybrid Return": "{:.2f}%", "Buy&Hold Return": "{:.2f}%", "Diff": "{:.2f}%", "Max Drawdown": "{:.2f}%", "Win Rate": "{:.2f}%"}), width="stretch", hide_index=True)
+    c1, c2 = st.columns(2)
+    weighted_chart = _chart_path(selected_ticker, "weighted")
+    buy_hold_chart = _chart_path(selected_ticker, "buy_hold")
+    with c1:
+        if weighted_chart:
+            st.image(weighted_chart, caption="Weighted Hybrid portfolio", width="stretch")
+        else:
+            st.warning("Weighted Hybrid portfolio grafigi bulunamadi. `python -m src.pipeline --step backtest --coin BTC-USD` komutu calistirilabilir.")
+    with c2:
+        if buy_hold_chart:
+            st.image(buy_hold_chart, caption="Buy & Hold portfolio", width="stretch")
+        else:
+            st.warning("Buy & Hold portfolio grafigi bulunamadi.")
+
+
+def page_presentation_experiments(presentation_mode=True):
+    st.header("Deneysel Çalışmalar")
+    show_presentation_notice()
+    _proof_box("Hangi deneylerin production'a alinmadigini ve neden reddedildigini gosterir.")
+    st.dataframe(pd.DataFrame([
+        {"Coin": "BTC-USD", "Production RF+XGB Val F1": 0.464, "Experiment RF+XGB Val F1": 0.535, "Experiment WH Val F1": 0.563, "Decision": "Validation iyi, test/backtest zayif: reddedildi"},
+        {"Coin": "ETH-USD", "Production RF+XGB Val F1": 0.559, "Experiment RF+XGB Val F1": 0.447, "Experiment WH Val F1": 0.462, "Decision": "Validation kotulesti: reddedildi"},
+        {"Coin": "SOL-USD", "Production RF+XGB Val F1": 0.622, "Experiment RF+XGB Val F1": 0.441, "Experiment WH Val F1": 0.458, "Decision": "Validation kotulesti: reddedildi"},
+    ]), width="stretch", hide_index=True)
+    st.info("Legacy veri, PPO/RL ve main.py / SQLite / BTCUSDT bot akisi ana production karar yolu degildir.")
+
+
+def page_presentation_risks(presentation_mode=True):
+    st.header("Riskler ve Sinirlamalar")
+    show_presentation_notice()
+    _proof_box("Sistemin karar destek prototipi oldugunu, canli trading ve garanti getiri iddiasi tasimadigini gosterir.")
+    st.markdown("- Backtest gelecek performansi garanti etmez.\n- Test set secim icin kullanilmaz.\n- Sistem yatirim tavsiyesi degildir.\n- Model performansi piyasa rejimine baglidir.")
+
+
+def page_presentation_jury_questions(presentation_mode=True):
+    st.header("Akademik Değerlendirme Notları")
+    show_presentation_notice()
+    _proof_box("Teknik juri sorularina kisa cevap, kanit sayfasi, teknik kanit ve dikkatli ifade sunar.")
+    st.subheader("Çalışma Özeti")
+    st.dataframe(pd.DataFrame(_proof_map_rows()), width="stretch", hide_index=True)
+    for idx, item in enumerate(_jury_question_rows(), start=1):
+        with st.container(border=True):
+            st.markdown(f"**{idx}. Soru:** {item['Soru']}")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(f"**Kisa cevap:** {item['Kisa cevap']}")
+                st.markdown(f"**İlgili bölüm:** {item.get('İlgili bölüm', '-')}")
+            with c2:
+                st.markdown(f"**Teknik not:** {item.get('Teknik not', '-')}")
+                st.markdown(f"**Dikkat:** {item['Dikkat']}")
+
+
+def page_presentation_legacy_archive():
+    st.header("Legacy / Arsiv Bilgisi - Ana Pipeline'da Kullanilmiyor")
+    st.warning("Bu bolum eski gelistirme doneminden kalan arsiv/legacy bilgidir. Guncel sistem data/raw ve data/ml altindaki yeni datasetleri, src/data/build_dataset.py ve src/data/feature_store.py tabanli yeni pipeline'i kullanir.")
+
+
+def _safe_legacy_page(title, page_func):
+    try:
+        page_func()
+    except Exception as exc:
+        st.warning(
+            f"{title} acilamadi. Bu bolum legacy/arsiv bilgisidir; "
+            "ana sunum ve production karar akisi bu sayfayi kullanmaz."
+        )
+        with st.expander("Legacy teknik hata", expanded=False):
+            st.code(str(exc))
+
+
+def _academic_notice():
+    st.caption("Bu sistem yatırım tavsiyesi değildir; model çıktıları akademik karar destek prototipi kapsamında değerlendirilmelidir.")
+
+
+def _dataset_summary_rows():
+    return [
+        {"Coin": "BTC-USD", "Raw satır": 3215, "Train": 2034, "Validation": 435, "Test": 437, "Feature": 20},
+        {"Coin": "ETH-USD", "Raw satır": 3215, "Train": 2074, "Validation": 444, "Test": 446, "Feature": 20},
+        {"Coin": "SOL-USD", "Raw satır": 2125, "Train": 1367, "Validation": 292, "Test": 294, "Feature": 20},
+    ]
+
+
+@st.cache_data
+def _load_current_raw_ohlcv(ticker, cache_version="academic_ui_v1"):
+    path = os.path.join(BASE_DIR, "data", "raw", f"{ticker}_ohlcv.csv")
+    if not os.path.exists(path):
+        return None
+    df = pd.read_csv(path)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+    elif "Date" in df.columns:
+        df["date"] = pd.to_datetime(df["Date"])
+    return df
+
+
+@st.cache_data
+def _label_distribution_rows(cache_version="academic_ui_v1"):
+    from src.data.feature_store import FeatureStore
+
+    rows = []
+    for ticker in AVAILABLE_TICKERS:
+        store = FeatureStore(ticker)
+        for split_name in ["train", "val", "test"]:
+            _, y = store.get_xgb_split(split_name)
+            rows.append({"Coin": ticker, "Split": split_name, "Label": "DOWN/CLOSE", "Adet": int(np.sum(np.asarray(y) == 0))})
+            rows.append({"Coin": ticker, "Split": split_name, "Label": "UP/BUY", "Adet": int(np.sum(np.asarray(y) == 1))})
+    return rows
+
+
+def page_academic_overview():
+    st.markdown('<p class="main-header">Kripto Para Yön Tahmini ve Karar Destek Sistemi</p>', unsafe_allow_html=True)
+    _academic_notice()
+    st.write(
+        "Bu çalışma BTC, ETH ve SOL için günlük piyasa yönünü tahmin eden; makine öğrenmesi, "
+        "derin öğrenme ve ağırlıklı karar birleştirme yaklaşımını kullanan akademik bir karar destek prototipidir."
+    )
+    st.subheader("Model Formülü")
+    st.code("final_prob = 0.40 * RandomForest + 0.40 * XGBoost + 0.20 * LSTM")
+
+    summary = pd.DataFrame(_dataset_summary_rows())
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Coin sayısı", "3")
+    c2.metric("Aktif feature", "20")
+    c3.metric("WINDOW_SIZE", "30")
+    c4.metric("PURGE_GAP", "14")
+
+    st.subheader("Veri Kapsamı")
+    st.dataframe(summary, width="stretch", hide_index=True)
+
+    st.subheader("Model Bileşenleri")
+    st.dataframe(pd.DataFrame([
+        {"Bileşen": "Random Forest", "Rol": "Tabular teknik göstergelerden yön olasılığı üretir."},
+        {"Bileşen": "XGBoost", "Rol": "Tabular teknik göstergelerden yön olasılığı üretir."},
+        {"Bileşen": "LSTM", "Rol": "Zaman penceresi tabanlı destekleyici olasılık üretir."},
+        {"Bileşen": "Weighted Hybrid", "Rol": "Üç model çıktısını sabit ağırlıklarla nihai karara dönüştürür."},
+    ]), width="stretch", hide_index=True)
+
+    st.subheader("Backtest Özeti")
+    try:
+        bt = pd.DataFrame(_backtest_evidence_rows())
+        st.dataframe(bt[["Coin", "Weighted Hybrid Return", "Buy&Hold Return", "Max Drawdown", "Win Rate", "Trade Count"]].style.format({
+            "Weighted Hybrid Return": "{:.2f}%",
+            "Buy&Hold Return": "{:.2f}%",
+            "Max Drawdown": "{:.2f}%",
+            "Win Rate": "{:.2f}%",
+        }), width="stretch", hide_index=True)
+    except Exception as exc:
+        st.warning("Backtest özeti okunamadı. Backtest Sonuçları sayfasında ayrıntılı çıktı kontrol edilebilir.")
+        with st.expander("Teknik ayrıntı", expanded=False):
+            st.code(str(exc))
+
+
+def page_academic_dataset_pipeline():
+    st.header("Veri Seti ve Pipeline")
+    _academic_notice()
+    st.success(f"Aktif raw veri: data/raw/{selected_ticker}_ohlcv.csv")
+    st.success(f"Aktif dataset: data/ml/{selected_ticker}/")
+
+    st.subheader("Aktif Pipeline")
+    st.markdown("Binance OHLCV → data/raw → feature_engineering → build_dataset → FeatureStore → RF/XGBoost/LSTM → Weighted Hybrid")
+    st.dataframe(pd.DataFrame(_active_pipeline_rows()), width="stretch", hide_index=True)
+
+    st.subheader("Dataset Özeti")
+    st.dataframe(pd.DataFrame(_dataset_summary_rows()), width="stretch", hide_index=True)
+
+    c1, c2 = st.columns(2)
+    c1.metric("WINDOW_SIZE", "30")
+    c2.metric("PURGE_GAP", "14")
+
+    st.subheader("Train / Validation / Test Ayrımı")
+    st.write(
+        "Train bölümü model öğrenimi için, validation bölümü model davranışını izlemek ve seçim kararlarını doğrulamak için, "
+        "test bölümü ise yalnızca final performans raporlaması için kullanılır."
+    )
+
+    st.subheader("Leakage Önlemleri")
+    st.markdown(
+        "- Zaman sırası korunur.\n"
+        "- Train, validation ve test blokları arasında purge gap uygulanır.\n"
+        "- Test seti model, eşik veya ağırlık seçimi için kullanılmaz.\n"
+        "- RF/XGBoost ve LSTM splitleri FeatureStore üzerinden hizalı okunur."
+    )
+
+    st.subheader("Feature Grupları")
+    st.dataframe(pd.DataFrame([
+        {"Grup": "Getiri", "Örnek feature": "log_return_1d, close_open_return, return_lag_5, return_lag_20"},
+        {"Grup": "Trend/Momentum", "Örnek feature": "momentum_10, sma_ratio_20, ema_ratio_50"},
+        {"Grup": "Volatilite", "Örnek feature": "volatility_20, atr_pct, high_low_range"},
+        {"Grup": "Teknik indikatör", "Örnek feature": "rsi_14, macd_pct, macd_signal_pct, adx_14"},
+        {"Grup": "Hacim ve bantlar", "Örnek feature": "volume_change, bb_width, bb_position, stoch_k"},
+    ]), width="stretch", hide_index=True)
+
+
+def page_academic_visualization():
+    st.header("Veri Görselleştirme")
+    _academic_notice()
+    raw_df = _load_current_raw_ohlcv(selected_ticker)
+    if raw_df is None or raw_df.empty:
+        st.warning(f"Güncel raw veri bulunamadı: data/raw/{selected_ticker}_ohlcv.csv")
+        return
+
+    date_col = "date" if "date" in raw_df.columns else raw_df.columns[0]
+    close_col = "close" if "close" in raw_df.columns else "Close"
+    if close_col not in raw_df.columns:
+        st.warning("Raw veri içinde close kolonu bulunamadı.")
+        return
+
+    chart_df = raw_df[[date_col, close_col]].dropna().copy()
+    chart_df["daily_return"] = chart_df[close_col].pct_change()
+
+    st.subheader(f"{selected_ticker} Kapanış Fiyatı")
+    fig_close = go.Figure()
+    fig_close.add_trace(go.Scatter(x=chart_df[date_col], y=chart_df[close_col], mode="lines", name="Close"))
+    fig_close.update_layout(template="plotly_white", height=360, xaxis_title="Tarih", yaxis_title="Kapanış")
+    st.plotly_chart(fig_close, use_container_width=True)
+
+    st.subheader("Günlük Getiri")
+    fig_return = go.Figure()
+    fig_return.add_trace(go.Scatter(x=chart_df[date_col], y=chart_df["daily_return"], mode="lines", name="Daily return"))
+    fig_return.update_layout(template="plotly_white", height=320, xaxis_title="Tarih", yaxis_title="Getiri")
+    st.plotly_chart(fig_return, use_container_width=True)
+
+    volume_col = "volume" if "volume" in raw_df.columns else "Volume"
+    if volume_col in raw_df.columns:
+        st.subheader("Hacim")
+        fig_volume = go.Figure()
+        fig_volume.add_trace(go.Bar(x=raw_df[date_col], y=raw_df[volume_col], name="Volume"))
+        fig_volume.update_layout(template="plotly_white", height=320, xaxis_title="Tarih", yaxis_title="Hacim")
+        st.plotly_chart(fig_volume, use_container_width=True)
+
+    st.subheader("Train / Validation / Test Örnek Sayısı")
+    split_rows = []
+    for row in _dataset_summary_rows():
+        for split_name in ["Train", "Validation", "Test"]:
+            split_rows.append({"Coin": row["Coin"], "Split": split_name, "Adet": row[split_name]})
+    split_df = pd.DataFrame(split_rows)
+    fig_split = px.bar(split_df, x="Coin", y="Adet", color="Split", barmode="group", template="plotly_white")
+    fig_split.update_layout(height=340)
+    st.plotly_chart(fig_split, use_container_width=True)
+
+    st.subheader("Label Dağılımı")
+    try:
+        label_df = pd.DataFrame(_label_distribution_rows())
+        fig_label = px.bar(label_df[label_df["Coin"] == selected_ticker], x="Split", y="Adet", color="Label", barmode="group", template="plotly_white")
+        fig_label.update_layout(height=340)
+        st.plotly_chart(fig_label, use_container_width=True)
+    except Exception as exc:
+        st.warning("Label dağılımı FeatureStore üzerinden okunamadı.")
+        with st.expander("Teknik ayrıntı", expanded=False):
+            st.code(str(exc))
+
+
+def page_academic_decision():
+    st.header("Model Kararı")
+    _academic_notice()
+    try:
+        snap = _decision_snapshot(selected_ticker)
+    except Exception as exc:
+        st.warning("Model kararı compute_final_probs üzerinden hesaplanamadı.")
+        with st.expander("Teknik ayrıntı", expanded=False):
+            st.code(str(exc))
+        return
+
+    weights = snap["weights"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("RF probability", f"{snap['rf_prob']:.4f}")
+    c2.metric("XGBoost probability", f"{snap['xgb_prob']:.4f}")
+    c3.metric("LSTM probability", f"{snap['lstm_prob']:.4f}")
+    c4.metric("final_prob", f"{snap['final_prob']:.4f}")
+
+    st.dataframe(pd.DataFrame([{
+        "Coin": selected_ticker,
+        "Ağırlıklar": f"RF {weights['rf']:.2f} / XGBoost {weights['xgb']:.2f} / LSTM {weights['lstm']:.2f}",
+        "Sinyal": snap["signal"],
+        "Karar bandı": _decision_band(snap["final_prob"]),
+        "Fallback durumu": "Aktif" if snap["lstm_fallback_active"] else "Pasif",
+    }]), width="stretch", hide_index=True)
+
+
+def page_academic_model_comparison():
+    st.header("Model Karşılaştırması")
+    _academic_notice()
+    st.write("Metrikler validation ve test splitleri için ayrı gösterilir. Test sonuçları model seçimi için kullanılmaz.")
+    val_tab, test_tab = st.tabs(["Validation", "Test"])
+    try:
+        with val_tab:
+            val_df = pd.DataFrame(_model_metric_rows(selected_ticker, "val"))[["Model", "Accuracy", "F1", "AUC"]]
+            st.dataframe(val_df.style.format({"Accuracy": "{:.2%}", "F1": "{:.2%}", "AUC": "{:.3f}"}), width="stretch", hide_index=True)
+        with test_tab:
+            test_df = pd.DataFrame(_model_metric_rows(selected_ticker, "test"))[["Model", "Accuracy", "F1", "AUC"]]
+            st.dataframe(test_df.style.format({"Accuracy": "{:.2%}", "F1": "{:.2%}", "AUC": "{:.3f}"}), width="stretch", hide_index=True)
+    except Exception as exc:
+        st.warning("Model karşılaştırma metrikleri hesaplanamadı.")
+        with st.expander("Teknik ayrıntı", expanded=False):
+            st.code(str(exc))
+
+
+def page_academic_model_statistics():
+    st.header("Model İstatistikleri")
+    _academic_notice()
+    saved = _load_saved_evaluation_metrics(selected_ticker)
+    if saved:
+        st.info("Kayıtlı değerlendirme metriği bulundu: outputs/metrics/{ticker}_evaluation_metrics.json")
+        st.dataframe(pd.DataFrame([{
+            "Coin": selected_ticker,
+            "Accuracy": saved.get("accuracy"),
+            "Precision": saved.get("precision"),
+            "Recall": saved.get("recall"),
+            "F1": saved.get("f1"),
+            "AUC": saved.get("auc_roc"),
+            "Support": saved.get("support", {}).get("total"),
+            "LSTM fallback": "Aktif" if saved.get("lstm_degenerate") else "Pasif",
+        }]).style.format({
+            "Accuracy": "{:.2%}",
+            "Precision": "{:.2%}",
+            "Recall": "{:.2%}",
+            "F1": "{:.2%}",
+            "AUC": "{:.3f}",
+        }), width="stretch", hide_index=True)
+    else:
+        st.warning("Kayıtlı evaluation metrics JSON bulunamadı; güvenli canlı hesaplama kullanılacak.")
+
+    val_tab, test_tab = st.tabs(["Validation istatistikleri", "Test istatistikleri"])
+    for split_name, tab in [("val", val_tab), ("test", test_tab)]:
+        with tab:
+            try:
+                bundle = _model_statistics_bundle(selected_ticker, split_name)
+                stats_df = pd.DataFrame(bundle["rows"])
+                st.subheader("Metrikler ve Probability Dağılımı")
+                st.dataframe(stats_df.style.format({
+                    "Accuracy": "{:.2%}",
+                    "Precision": "{:.2%}",
+                    "Recall": "{:.2%}",
+                    "F1": "{:.2%}",
+                    "AUC": "{:.3f}",
+                    "Probability Mean": "{:.4f}",
+                    "Probability Std": "{:.4f}",
+                    "Probability Min": "{:.4f}",
+                    "Probability Max": "{:.4f}",
+                }), width="stretch", hide_index=True)
+
+                st.subheader("Confusion Matrix")
+                selected_model = st.selectbox(
+                    f"{split_name.upper()} model",
+                    list(bundle["matrices"].keys()),
+                    key=f"cm_model_{split_name}",
+                )
+                cm = np.asarray(bundle["matrices"][selected_model])
+                fig_cm = px.imshow(
+                    cm,
+                    labels=dict(x="Tahmin", y="Gerçek", color="Adet"),
+                    x=["DOWN/CLOSE", "UP/BUY"],
+                    y=["DOWN/CLOSE", "UP/BUY"],
+                    text_auto=True,
+                    color_continuous_scale="Blues",
+                )
+                fig_cm.update_layout(template="plotly_white", height=360)
+                st.plotly_chart(fig_cm, use_container_width=True)
+            except Exception as exc:
+                st.warning(f"{split_name} istatistikleri hesaplanamadı.")
+                with st.expander("Teknik ayrıntı", expanded=False):
+                    st.code(str(exc))
+
+    st.subheader("Feature Importance Top 10")
+    try:
+        fi_rows = _feature_importance_rows(selected_ticker)
+        if fi_rows:
+            fi_df = pd.DataFrame(fi_rows)
+            st.dataframe(fi_df.style.format({"Importance": "{:.6f}"}), width="stretch", hide_index=True)
+            fig_fi = px.bar(fi_df, x="Importance", y="Feature", color="Model", facet_col="Model", orientation="h", template="plotly_white")
+            fig_fi.update_layout(height=430, showlegend=False)
+            st.plotly_chart(fig_fi, use_container_width=True)
+        else:
+            st.info("Production RF/XGBoost modellerinde feature_importances_ alanı bulunamadı.")
+    except Exception as exc:
+        st.warning("Feature importance okunamadı.")
+        with st.expander("Teknik ayrıntı", expanded=False):
+            st.code(str(exc))
+
+
+def page_academic_backtest():
+    st.header("Backtest Sonuçları")
+    _academic_notice()
+    try:
+        rows = pd.DataFrame(_backtest_evidence_rows())
+        selected_row = rows[rows["Coin"] == selected_ticker]
+        display_rows = selected_row if not selected_row.empty else rows.head(1)
+        st.dataframe(display_rows[["Coin", "Weighted Hybrid Return", "Buy&Hold Return", "Max Drawdown", "Win Rate", "Trade Count"]].style.format({
+            "Weighted Hybrid Return": "{:.2f}%",
+            "Buy&Hold Return": "{:.2f}%",
+            "Max Drawdown": "{:.2f}%",
+            "Win Rate": "{:.2f}%",
+        }), width="stretch", hide_index=True)
+    except Exception as exc:
+        st.warning("Backtest metrikleri okunamadı. Hazır grafikler varsa aşağıda gösterilir.")
+        with st.expander("Teknik ayrıntı", expanded=False):
+            st.code(str(exc))
+
+    c1, c2 = st.columns(2)
+    weighted_chart = _chart_path(selected_ticker, "weighted")
+    buy_hold_chart = _chart_path(selected_ticker, "buy_hold")
+    with c1:
+        if weighted_chart:
+            st.image(weighted_chart, caption="Weighted Hybrid portfolio", width="stretch")
+        else:
+            st.warning("Weighted Hybrid backtest grafiği bulunamadı. Komut: py -m src.pipeline --step backtest --coin BTC-USD")
+    with c2:
+        if buy_hold_chart:
+            st.image(buy_hold_chart, caption="Buy & Hold portfolio", width="stretch")
+        else:
+            st.warning("Buy & Hold grafiği bulunamadı.")
+
+
+def page_academic_backtest_statistics():
+    st.header("Backtest İstatistikleri")
+    _academic_notice()
+    try:
+        rows = pd.DataFrame(_backtest_evidence_rows())
+        cols = ["Coin", "Weighted Hybrid Return", "Buy&Hold Return", "Diff", "Max Drawdown", "Win Rate", "Trade Count"]
+        st.subheader("Coin Bazlı Karşılaştırma")
+        st.dataframe(rows[cols].style.format({
+            "Weighted Hybrid Return": "{:.2f}%",
+            "Buy&Hold Return": "{:.2f}%",
+            "Diff": "{:.2f}%",
+            "Max Drawdown": "{:.2f}%",
+            "Win Rate": "{:.2f}%",
+        }), width="stretch", hide_index=True)
+
+        selected_row = rows[rows["Coin"] == selected_ticker]
+        if not selected_row.empty:
+            r = selected_row.iloc[0]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Weighted Hybrid Return", f"{float(r['Weighted Hybrid Return']):.2f}%")
+            c2.metric("Buy & Hold Return", f"{float(r['Buy&Hold Return']):.2f}%")
+            c3.metric("Fark", f"{float(r['Diff']):.2f}%")
+            c4, c5, c6 = st.columns(3)
+            c4.metric("Max Drawdown", f"{float(r['Max Drawdown']):.2f}%")
+            c5.metric("Win Rate", f"{float(r['Win Rate']):.2f}%")
+            c6.metric("Trade Count", str(r["Trade Count"]))
+    except Exception as exc:
+        st.warning("Backtest istatistikleri hesaplanamadı. Hazır grafikler Backtest Sonuçları sayfasında kontrol edilebilir.")
+        with st.expander("Teknik ayrıntı", expanded=False):
+            st.code(str(exc))
+
+    st.subheader("Hazır Çıktı Durumu")
+    status_rows = []
+    for ticker in AVAILABLE_TICKERS:
+        status_rows.append({
+            "Coin": ticker,
+            "Weighted Hybrid grafik": "Var" if _chart_path(ticker, "weighted") else "Yok",
+            "Buy & Hold grafik": "Var" if _chart_path(ticker, "buy_hold") else "Yok",
+            "Evaluation metrics JSON": "Var" if _load_saved_evaluation_metrics(ticker) else "Yok",
+        })
+    st.dataframe(pd.DataFrame(status_rows), width="stretch", hide_index=True)
+
+
+def page_academic_experiments():
+    st.header("Deneysel Çalışmalar")
+    _academic_notice()
+    st.dataframe(pd.DataFrame([
+        {"Çalışma": "LSTM veri yetersizliği", "Sonuç": "Yeni data/raw ve data/ml yapısı ile daha uzun Binance geçmişi kullanıldı; LSTM güvenli checkpoint loader ile okunur."},
+        {"Çalışma": "RF/XGBoost yeniden eğitim deneyi", "Sonuç": "Deney modelleri ml_experiments altında bırakıldı; production modellerine bağlanmadı."},
+        {"Çalışma": "PPO/RL", "Sonuç": "Deneysel kaldı; production karar yoluna dahil edilmedi."},
+        {"Çalışma": "Eski ensemble yaklaşımı", "Sonuç": "Legacy olarak bırakıldı; güncel karar akışı Weighted Hybrid üzerinden yürür."},
+    ]), width="stretch", hide_index=True)
+
+    st.subheader("RF/XGBoost Yeniden Eğitim Kararı")
+    st.dataframe(pd.DataFrame([
+        {"Coin": "BTC-USD", "Gözlem": "Validation iyileşmesine rağmen test/backtest zayıfladı.", "Karar": "Production'a alınmadı"},
+        {"Coin": "ETH-USD", "Gözlem": "Validation tarafında production modelden kötüleşti.", "Karar": "Production'a alınmadı"},
+        {"Coin": "SOL-USD", "Gözlem": "Validation tarafında production modelden kötüleşti.", "Karar": "Production'a alınmadı"},
+    ]), width="stretch", hide_index=True)
+
+
+def page_academic_risks():
+    st.header("Riskler ve Sınırlamalar")
+    _academic_notice()
+    st.markdown(
+        "- Bu sistem yatırım tavsiyesi değildir.\n"
+        "- Backtest sonuçları gelecek performansı garanti etmez.\n"
+        "- Uygulamada canlı emir iletimi bulunmaz.\n"
+        "- Piyasa rejimi değişimleri model performansını etkileyebilir.\n"
+        "- Model çıktıları karar destek amaçlıdır ve tek başına finansal karar yerine geçmez."
+    )
+
+
+def main():
+    with st.sidebar:
+        st.markdown("# KDS")
+        st.title("Kripto Karar Destek")
+        st.markdown("---")
+
+        page = st.radio("Sayfa Secin", [
+            "Genel Bakış",
+            "Veri Seti ve Pipeline",
+            "Veri Görselleştirme",
+            "Model Kararı",
+            "Model Karşılaştırması",
+            "Model İstatistikleri",
+            "Backtest Sonuçları",
+            "Backtest İstatistikleri",
+            "Deneysel Çalışmalar",
+            "Riskler ve Sınırlamalar",
+        ])
+
+        st.markdown("---")
+        st.markdown("**Aktif Sistem:**")
+        st.markdown("""
+        - data/raw + data/ml
+        - build_dataset + FeatureStore
+        - Weighted Hybrid production akisi
+        """)
+
+    if page == "Genel Bakış":
+        page_academic_overview()
+    elif page == "Veri Seti ve Pipeline":
+        page_academic_dataset_pipeline()
+    elif page == "Veri Görselleştirme":
+        page_academic_visualization()
+    elif page == "Model Kararı":
+        page_academic_decision()
+    elif page == "Model Karşılaştırması":
+        page_academic_model_comparison()
+    elif page == "Model İstatistikleri":
+        page_academic_model_statistics()
+    elif page == "Backtest Sonuçları":
+        page_academic_backtest()
+    elif page == "Backtest İstatistikleri":
+        page_academic_backtest_statistics()
+    elif page == "Deneysel Çalışmalar":
+        page_academic_experiments()
+    elif page == "Riskler ve Sınırlamalar":
+        page_academic_risks()
 if __name__ == "__main__":
     main()

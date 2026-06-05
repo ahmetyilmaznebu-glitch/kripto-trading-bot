@@ -69,111 +69,78 @@ def get_predictions(X_dl, X_ml, lstm, gru, rf, xgb):
     
     return lstm_preds, gru_preds, rf_preds, xgb_preds
 
-def _add_cross_features(X):
+def _add_cross_features(meta_X):
     """
-    Base model tahminleri üzerine çapraz özellikler (cross-features) ekler.
-    X shape: (N, 4) -> (N, 7)
-    Yeni özellikler:
-      - mean_pred: Tahminlerin ortalaması (fikir birliği)
-      - std_pred: Tahminlerin standart sapması (kararsızlık/varyans)
-      - spread_pred: Max - Min tahmin farkı
+    Base model tahminleri arasinda capraz ozellikler ekler.
+    meta_X shape: (N, 4) -> (N, 10)
+
+    Yeni ozellikler (6 adet):
+      - DL modellerin ortalamasi: (LSTM + GRU) / 2
+      - ML modellerin ortalamasi: (RF + XGB) / 2
+      - DL modeller arasi uyumsuzluk: |LSTM - GRU|
+      - ML modeller arasi uyumsuzluk: |RF - XGB|
+      - Tum modellerin ortalamasi
+      - Modeller arasi belirsizlik (std)
     """
-    mean_pred = np.mean(X, axis=1, keepdims=True)
-    std_pred = np.std(X, axis=1, keepdims=True)
-    spread_pred = (np.max(X, axis=1) - np.min(X, axis=1)).reshape(-1, 1)
-    
-    return np.hstack((X, mean_pred, std_pred, spread_pred))
+    lstm, gru, rf, xgb = meta_X[:, 0], meta_X[:, 1], meta_X[:, 2], meta_X[:, 3]
+    cross = np.column_stack([
+        (lstm + gru) / 2,           # DL modellerin ortalamasi
+        (rf + xgb) / 2,             # ML modellerin ortalamasi
+        np.abs(lstm - gru),          # DL modeller arasindaki uyumsuzluk
+        np.abs(rf - xgb),           # ML modeller arasindaki uyumsuzluk
+        np.mean(meta_X, axis=1),    # Tum modellerin ortalamasi
+        np.std(meta_X, axis=1),     # Modeller arasi belirsizlik
+    ])
+    return np.hstack([meta_X, cross])
 
 def main(ticker="BTC-USD"):
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    data_dir = os.path.join(base_dir, 'data', 'processed')
     models_dir = os.path.join(base_dir, 'src', 'models', 'saved_models')
-    
-    # Verileri yukle
-    X_dl = np.load(os.path.join(data_dir, f'{ticker}_X_windows.npy'), allow_pickle=True).astype(np.float32)
-    df = pd.read_csv(os.path.join(data_dir, f'{ticker}_processed_scaled.csv'), index_col=0)
-    
-    WINDOW_SIZE = 60
-    ml_features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD',
-                    'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50',
-                    'Log_Return', 'Return_Lag_5', 'Return_Lag_10', 'Return_Lag_20',
-                    'Daily_Return', 'Volatility_20', 'Momentum_10', 'Volume_Change',
-                    'ATR', 'ADX', 'Stoch_K', 'OBV_Change',
-                    'Price_To_SMA20', 'Price_To_EMA50']
-    ml_features = [c for c in ml_features if c in df.columns]
-    
-    X_ml_base = df[ml_features].values
-    
-    # DUZELTME (Hata #1): Fallback hesaplamasi dongu disinda bir kere yapilir
-    if 'Direction' in df.columns:
-        direction_values = df['Direction'].values
-    else:
-        # Fallback: olceklenmis Close ve Target_Close degerleri
-        # UYARI: Bu degerler farkli scaler'larla olceklenmis olabilir
-        direction_values = (df['Target_Close'].values > df['Close'].values).astype(int)
-    
-    # Sliding window hizalamasi
-    X_ml = []
-    y_classification = []
-    
-    for i in range(len(df) - WINDOW_SIZE):
-        X_ml.append(X_ml_base[i + WINDOW_SIZE - 1])
-        signal = int(direction_values[i + WINDOW_SIZE - 1])
-        y_classification.append(signal)
-    
-    X_ml = np.array(X_ml)
-    y_classification = np.array(y_classification)
-    
-    # Boyut kontrolu: X_dl ve X_ml ayni uzunlukta olmali
-    min_len = min(len(X_dl), len(X_ml))
-    X_dl = X_dl[:min_len]
-    X_ml = X_ml[:min_len]
-    y_classification = y_classification[:min_len]
-    
-    # Train/Test split
-    train_size = int(len(X_dl) * 0.8)
-    X_dl_train = X_dl[:train_size]
-    X_ml_train = X_ml[:train_size]
-    y_train = y_classification[:train_size]
-    
-    X_dl_test = X_dl[train_size:]
-    X_ml_test = X_ml[train_size:]
-    y_test = y_classification[train_size:]
-    
+
+    from src.data.feature_store import FeatureStore
+    store = FeatureStore(ticker)
+
+    print(f"\n{'=' * 60}")
+    print(f"  {ticker} Ensemble Meta-Model (Unified FeatureStore)")
+    print(f"{'=' * 60}")
+
+    # Unified split — tum modeller ayni bolumu kullanir
+    X_dl_train, y_train = store.get_lstm_split("train")
+    X_ml_train, _ = store.get_xgb_split("train")
+    X_dl_val, y_val = store.get_lstm_split("val")
+    X_ml_val, _ = store.get_xgb_split("val")
+    X_dl_test, y_test = store.get_lstm_split("test")
+    X_ml_test, _ = store.get_xgb_split("test")
+
+    y_train = y_train.astype(np.int32)
+    y_val = y_val.astype(np.int32)
+    y_test = y_test.astype(np.int32)
+
     # Base modelleri yukle
-    lstm, gru, rf, xgb = load_models(models_dir, input_size=X_dl.shape[2], ticker=ticker)
-    
+    lstm, gru, rf, xgb = load_models(models_dir, input_size=X_dl_train.shape[2], ticker=ticker)
+
     # VERI SIZINTISI AZALTMA:
-    # Base modeller tum egitim verisiyle egitildi.
-    # Meta-model icin egitim verisinin son %50'sini kullaniyoruz.
-    # DUZELTME: Eski kod son %20'yi kullaniyordu (~214 ornek), bu cok az;
-    # GradientBoosting 214 ornekle aşırı öğreniyor ve tek modele (XGB) yakinsiyor.
-    # Son %50 (~536 ornek) ile meta-model daha dengeli agirliklar ogrenir.
-    # NOT: Ideal cozum K-Fold OOF predictions olurdu, ama bu base modellerin
-    # K kez yeniden egitilmesini gerektirir. Mevcut yaklasim pragmatik bir cozumdur.
-    mid = int(train_size * 0.5)  # Son %50'yi meta-model icin kullan
-    
-    # Meta-model girdisi: base modellerin egitim verisinin son %20'sindeki tahminler
+    # Meta-model egitimi icin train setinin son %50'sini kullan
+    # (base modeller tum train seti ile egitildi)
+    mid = len(X_dl_train) // 2
     lstm_meta, gru_meta, rf_meta, xgb_meta = get_predictions(
         X_dl_train[mid:], X_ml_train[mid:], lstm, gru, rf, xgb
     )
     meta_X_train = np.column_stack((lstm_meta, gru_meta, rf_meta, xgb_meta))
-    # Capraz meta-ozellikler: model tahminleri arasindaki iliskiler
     meta_X_train = _add_cross_features(meta_X_train)
     meta_y_train = y_train[mid:]
-    
+
+    # Val verisi uzerinde tahminler (early stopping icin)
+    lstm_val, gru_val, rf_val, xgb_val = get_predictions(X_dl_val, X_ml_val, lstm, gru, rf, xgb)
+    meta_X_val = np.column_stack((lstm_val, gru_val, rf_val, xgb_val))
+    meta_X_val = _add_cross_features(meta_X_val)
+
     # Test verisi uzerinde tahminler
     lstm_test, gru_test, rf_test, xgb_test = get_predictions(X_dl_test, X_ml_test, lstm, gru, rf, xgb)
     meta_X_test = np.column_stack((lstm_test, gru_test, rf_test, xgb_test))
     meta_X_test = _add_cross_features(meta_X_test)
-    
+
     # ────────── Meta-model: GradientBoosting ──────────
-    # max_depth=2: Sığ ağaç, tek bir base modele aşırı bağımlılığı önler
-    # min_samples_leaf=10: Her yaprak en az 10 örnek — overfitting azaltır
-    # subsample=0.7: Stochastic GB, varyansı düşürür
-    # DUZELTME: validation_fraction + n_iter_no_change ile early stopping eklendi.
-    # Önceden sabit 100 ağaç kullanılıyordu; küçük meta-train setinde aşırı öğrenme
-    # riski vardı ve XGB'nin ağırlığı 1.0'a yaklaşıyordu.
     print("\n--- Ensemble Meta-Model Egitiliyor (GradientBoosting, Early Stopping ile) ---")
     meta_model = GradientBoostingClassifier(
         n_estimators=200,
@@ -187,16 +154,16 @@ def main(ticker="BTC-USD"):
         random_state=42
     )
     meta_model.fit(meta_X_train, meta_y_train)
-    
+
     # Degerlendirme
     meta_preds = meta_model.predict(meta_X_test)
     meta_acc = accuracy_score(y_test, meta_preds)
     meta_f1 = f1_score(y_test, meta_preds)
-    
+
     print(f"  Ensemble Accuracy: {meta_acc:.4f}")
     print(f"  Ensemble F1 Score: {meta_f1:.4f}")
     print(f"\n{classification_report(y_test, meta_preds, target_names=['DOWN', 'UP'])}")
-    
+
     # Meta-modeli kaydet
     joblib.dump(meta_model, os.path.join(models_dir, f'{ticker}_ensemble_meta_model.pkl'))
     print(f"{ticker} meta-model '{models_dir}' dizinine kaydedildi.")
@@ -204,16 +171,3 @@ def main(ticker="BTC-USD"):
 if __name__ == "__main__":
     main()
 
-
-def _add_cross_features(meta_X):
-    """Base model tahminleri arasinda capraz ozellikler ekler."""
-    lstm, gru, rf, xgb = meta_X[:, 0], meta_X[:, 1], meta_X[:, 2], meta_X[:, 3]
-    cross = np.column_stack([
-        (lstm + gru) / 2,           # DL modellerin ortalamasi
-        (rf + xgb) / 2,             # ML modellerin ortalamasi
-        np.abs(lstm - gru),          # DL modeller arasindaki uyumsuzluk
-        np.abs(rf - xgb),           # ML modeller arasindaki uyumsuzluk
-        np.mean(meta_X, axis=1),    # Tum modellerin ortalamasi
-        np.std(meta_X, axis=1),     # Modeller arasi belirsizlik
-    ])
-    return np.hstack([meta_X, cross])

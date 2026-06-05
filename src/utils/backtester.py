@@ -1,17 +1,27 @@
+"""
+Backtest Motoru — Weighted Hybrid Sinyal ile Gecmis Performans Simulasyonu.
+
+FeatureStore'dan unified split (test) verisini alir,
+final_prob formulu ile sinyal uretir ve geri test yapar.
+
+Kullanim:
+    python -m src.utils.backtester
+    python -m src.utils.backtester --ticker ETH-USD
+"""
 import numpy as np
-import pandas as pd
 import os
 import sys
 import matplotlib
 matplotlib.use('Agg')  # GUI olmayan ortamlarda grafik kaydetmek icin
 import matplotlib.pyplot as plt
 
-# Proje kokunu sys.path'e ekle (subprocess olarak calistiginda src.* importlari icin)
+# Proje kokunu sys.path'e ekle
 _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from src.models.meta_inference import compute_meta_probs, WINDOW_SIZE
+from src.models.meta_inference import compute_final_probs
+
 
 class SimpleBacktester:
     """
@@ -37,7 +47,7 @@ class SimpleBacktester:
         self.trades = []
         
     def run(self):
-        # DUZELTME (Hata #10): Tekrar cagrildiginda birikmesini onle
+        # Tekrar cagrildiginda birikmesini onle
         self.portfolio_values = []
         self.trades = []
         
@@ -54,9 +64,9 @@ class SimpleBacktester:
                 self.trades.append({'step': i, 'action': 'BUY', 'price': price, 'shares': shares_bought})
                 balance = 0
                 
-            elif signal == 0 and shares > 0:  # SAT
+            elif signal == 0 and shares > 0:  # Pozisyon kapat (nakite don)
                 revenue = shares * price * (1 - self.commission)
-                self.trades.append({'step': i, 'action': 'SELL', 'price': price, 'shares': shares})
+                self.trades.append({'step': i, 'action': 'CLOSE', 'price': price, 'shares': shares})
                 balance += revenue
                 shares = 0
                 
@@ -90,16 +100,15 @@ class SimpleBacktester:
         drawdown = (peak - self.portfolio_values) / peak
         max_drawdown = np.max(drawdown) * 100
         
-        # DUZELTME (Hata #6): FIFO eslestirme ile Win Rate hesaplama
-        # Her SELL islemini en son eslesmemis BUY ile eslestirir
-        buy_queue = []  # Henuz SELL ile eslesmemis BUY'lar
+        # FIFO eslestirme ile Win Rate hesaplama
+        buy_queue = []
         wins = 0
         total_closed = 0
         for t in self.trades:
             if t['action'] == 'BUY':
                 buy_queue.append(t)
-            elif t['action'] == 'SELL' and buy_queue:
-                matched_buy = buy_queue.pop(0)  # FIFO: Ilk giren ilk cikar
+            elif t['action'] == 'CLOSE' and buy_queue:
+                matched_buy = buy_queue.pop(0)  # FIFO
                 total_closed += 1
                 if t['price'] > matched_buy['price']:
                     wins += 1
@@ -124,17 +133,18 @@ class SimpleBacktester:
         # Ust Grafik: Portfoy Degeri
         ax1.plot(self.portfolio_values, label='Portfoy Degeri', color='#2196F3', linewidth=1.5)
         ax1.axhline(y=self.initial_capital, color='gray', linestyle='--', alpha=0.5, label='Baslangic Sermayesi')
-        ax1.set_title('Portfoy Performansi (Backtest)', fontsize=14, fontweight='bold')
+        ax1.set_title('Portfoy Performansi (Weighted Hybrid Backtest)', fontsize=14, fontweight='bold')
         ax1.set_ylabel('Portfoy Degeri ($)')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         
-        # AL/SAT noktalarini isaretleyelim
+        # AL/Pozisyon kapat noktalarini isaretleyelim
         for trade in self.trades:
             color = 'green' if trade['action'] == 'BUY' else 'red'
             marker = '^' if trade['action'] == 'BUY' else 'v'
-            ax1.scatter(trade['step'], self.portfolio_values[trade['step']], 
-                       color=color, marker=marker, s=30, zorder=5)
+            if trade['step'] < len(self.portfolio_values):
+                ax1.scatter(trade['step'], self.portfolio_values[trade['step']], 
+                           color=color, marker=marker, s=30, zorder=5)
         
         # Alt Grafik: Drawdown
         peak = np.maximum.accumulate(self.portfolio_values)
@@ -152,36 +162,34 @@ class SimpleBacktester:
             print(f"Grafik kaydedildi: {save_path}")
         plt.close()
 
+
 def main(ticker="BTC-USD"):
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    """Weighted hybrid sinyali ile backtest calistirir."""
     print("=" * 60)
-    print(f"       {ticker} ENSEMBLE META-MODEL TAHMINLERI YUKLENIYOR")
+    print(f"       {ticker} WEIGHTED HYBRID TAHMINLERI YUKLENIYOR")
     print("=" * 60)
-    # DUZELTME (Hata #5): Orijinal (olceklenmemis) fiyatlari kullan
-    meta_probs, df_scaled, df_original = compute_meta_probs(base_dir, ticker=ticker)
 
-    closes = df_original['Close'].values
+    # FeatureStore + weighted hybrid ile final_prob hesapla
+    final_probs, closes, component_info = compute_final_probs(ticker, split_name="test")
 
-    # Zaman serisi/ML tarafinda kullanilan pencere boyutu ile uyumlu sekilde
-    # sadece test bolumundeki (son %20) pencerelerin fiyat ve sinyallerini alalim
-    num_windows = len(meta_probs)
-    train_size = int(num_windows * 0.8)
+    # Agirlik bilgisini goster
+    w = component_info["weights"]
+    print(f"  Agirliklar: RF={w['rf']:.2f}, XGB={w['xgb']:.2f}, LSTM={w['lstm']:.2f}")
+    if component_info.get("lstm_degenerate"):
+        print(f"  [!] LSTM dejenere — agirligi otomatik 0'a dusuruldu")
 
-    window_indices_test = np.arange(train_size, num_windows)
-    price_indices = window_indices_test + (WINDOW_SIZE - 1)
-    price_indices = price_indices[price_indices < len(closes)]
+    prices = closes
 
-    prices = closes[price_indices]
+    # final_prob → sinyal cevrimi
+    signals = np.ones(len(final_probs), dtype=int)  # varsayilan: TUT
+    signals[final_probs > 0.55] = 2   # AL
+    signals[final_probs < 0.45] = 0   # Pozisyon kapat (nakite don)
 
-    # Meta-modelin UP (1) sinifina verdigi olasiligi AL/SAT/TUT sinyallerine cevir
-    meta_probs_test = meta_probs[train_size : train_size + len(price_indices)]
-    signals = np.zeros_like(meta_probs_test, dtype=int)
-    signals[meta_probs_test > 0.55] = 2     # AL
-    signals[meta_probs_test < 0.45] = 0     # SAT
-    signals[(meta_probs_test >= 0.45) & (meta_probs_test <= 0.55)] = 1  # TUT
-    
+    print(f"  Sinyal dagilimi: AL={np.sum(signals==2)}, TUT={np.sum(signals==1)}, "
+          f"KAPAT={np.sum(signals==0)}")
+
     print("=" * 60)
-    print(f"       {ticker} BACKTESTING MOTORU CALISTIRILIYOR (ENSEMBLE SINYAL)")
+    print(f"       {ticker} BACKTESTING MOTORU CALISTIRILIYOR (WEIGHTED HYBRID)")
     print("=" * 60)
     
     bt = SimpleBacktester(prices, signals, initial_capital=10000, commission=0.001)
@@ -189,17 +197,13 @@ def main(ticker="BTC-USD"):
     metrics = bt.calculate_metrics()
 
     # ── Buy-and-Hold Benchmark ──────────────────────────────────
-    # Baslangicta al, sonuna kadar tut. En basit strateji budur.
-    # Modelimiz bunu yenemiyorsa, gercek bir deger katmiyor demektir.
-    bah_signals = np.full(len(prices), 2, dtype=int)   # hep AL
+    bah_signals = np.full(len(prices), 1, dtype=int)   # hep TUT
     bah_signals[0] = 2                                  # ilk adimda al
-    bah_signals[1:] = 1                                 # geri kalaninda tut
     bt_bah = SimpleBacktester(prices, bah_signals, initial_capital=10000, commission=0.001)
     bt_bah.run()
     metrics_bah = bt_bah.calculate_metrics()
 
-    # ── Always-Hold Baseline (hic islem yapma) ──────────────────
-    # Nakit tutmak — %0 getiri referansi
+    # ── Always-Cash Baseline (hic islem yapma) ──────────────────
     hold_signals = np.ones(len(prices), dtype=int)      # hep TUT (nakit)
     bt_hold = SimpleBacktester(prices, hold_signals, initial_capital=10000, commission=0.001)
     bt_hold.run()
@@ -209,7 +213,7 @@ def main(ticker="BTC-USD"):
     print(f"\n{'='*65}")
     print(f"  {ticker} STRATEJI KARSILASTIRMA TABLOSU")
     print(f"{'='*65}")
-    print(f"  {'Metrik':<28} {'Ensemble':>12} {'Buy&Hold':>12} {'Nakit Tut':>10}")
+    print(f"  {'Metrik':<28} {'W.Hybrid':>12} {'Buy&Hold':>12} {'Nakit':>10}")
     print(f"  {'-'*62}")
     comparison_keys = ['Toplam Getiri (%)', 'Sharpe Orani', 'Max Drawdown (%)', 'Win Rate (%)']
     for key in comparison_keys:
@@ -230,21 +234,34 @@ def main(ticker="BTC-USD"):
     model_ret = _parse_pct(metrics.get('Toplam Getiri (%)', '0%'))
     bah_ret   = _parse_pct(metrics_bah.get('Toplam Getiri (%)', '0%'))
     if model_ret > bah_ret:
-        print(f"  SONUC: Ensemble, Buy-and-Hold'u {model_ret - bah_ret:.2f}% farkla ATTI.")
+        print(f"  SONUC: Weighted Hybrid, Buy-and-Hold'u {model_ret - bah_ret:.2f}% farkla ATTI.")
     else:
-        print(f"  SONUC: Ensemble, Buy-and-Hold'un {bah_ret - model_ret:.2f}% GERISINDE kaldi.")
+        print(f"  SONUC: Weighted Hybrid, Buy-and-Hold'un {bah_ret - model_ret:.2f}% GERISINDE kaldi.")
         print(f"  NOT: Bu, modelin aktif strateji olarak deger katmadigini gosterir.")
 
-    # Grafik Kaydet
-    results_dir = os.path.join(base_dir, 'data', 'results')
-    os.makedirs(results_dir, exist_ok=True)
-    bt.plot_results(save_path=os.path.join(results_dir, f'{ticker}_backtest_portfolio.png'))
+    # ── Grafik Kaydet ────────────────────────────────────────────
+    base_dir = _project_root
+    charts_dir = os.path.join(base_dir, 'outputs', 'charts')
+    os.makedirs(charts_dir, exist_ok=True)
+    bt.plot_results(save_path=os.path.join(charts_dir, f'{ticker}_backtest_portfolio.png'))
+    bt_bah.plot_results(save_path=os.path.join(charts_dir, f'{ticker}_buy_and_hold_portfolio.png'))
 
-    # Buy-and-hold grafigi de kaydet
-    bt_bah.plot_results(save_path=os.path.join(results_dir, f'{ticker}_buy_and_hold_portfolio.png'))
+    # ── Legacy Cikti (geriye uyumluluk) ──────────────────────────
+    # NOT: Dashboard eski konumu (data/results/) kullanabilir.
+    # Ana cikti dizini outputs/charts/ olmalidir.
+    # Bu ikili yazim gelecekte kaldirilabilir.
+    _WRITE_LEGACY = os.environ.get("BACKTEST_LEGACY_OUTPUT", "1") == "1"
+    if _WRITE_LEGACY:
+        results_dir = os.path.join(base_dir, 'data', 'results')
+        os.makedirs(results_dir, exist_ok=True)
+        bt.plot_results(save_path=os.path.join(results_dir, f'{ticker}_backtest_portfolio.png'))
 
     print(f"\n{ticker} Backtest tamamlandi!")
 
-if __name__ == "__main__":
-    main()
 
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ticker", default="BTC-USD")
+    args = parser.parse_args()
+    main(args.ticker)

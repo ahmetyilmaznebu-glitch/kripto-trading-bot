@@ -19,13 +19,16 @@ def create_classification_target(df, threshold=0.0):
     return df
 
 
-def train_classification_models(X_train, y_train, X_test, y_test):
+def train_classification_models(X_train, y_train, X_test, y_test, feature_names=None):
     """
     Random Forest ve XGBoost siniflandirici modellerini egitir.
     
     Iyilestirmeler:
     - Hyperparameter tuning (RandomizedSearchCV + TimeSeriesSplit)
     - Sinif dengesizligi kontrolu (class_weight / scale_pos_weight)
+    
+    Args:
+        feature_names: Ozellik adlari listesi. None ise otomatik uretilir.
     """
     results = {}
     
@@ -102,12 +105,10 @@ def train_classification_models(X_train, y_train, X_test, y_test):
     results['xgb'] = {'model': xgb_model, 'accuracy': xgb_acc, 'f1': xgb_f1}
     
     print("\n--- Feature Importance Raporu ---")
-    feature_names = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD',
-                     'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50',
-                     'Log_Return', 'Return_Lag_5', 'Return_Lag_10', 'Return_Lag_20',
-                     'Daily_Return', 'Volatility_20', 'Momentum_10', 'Volume_Change',
-                     'ATR', 'ADX', 'Stoch_K', 'OBV_Change',
-                     'Price_To_SMA20', 'Price_To_EMA50']
+    # DUZELTME: Hardcoded liste yerine parametre olarak gelen isimleri kullan
+    # Eksik sutun filtrelenmisken hardcoded liste etiket kaymasina neden oluyordu
+    if feature_names is None:
+        feature_names = [f"Feature_{i}" for i in range(X_train.shape[1])]
     rf_imp = rf_model.feature_importances_
     xgb_imp = xgb_model.feature_importances_
     for i, name in enumerate(feature_names[:len(rf_imp)]):
@@ -163,62 +164,38 @@ def train_classification_models(X_train, y_train, X_test, y_test):
 
 def main(ticker="BTC-USD"):
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    data_dir = os.path.join(base_dir, 'data', 'processed')
-    
-    # Islenmis veriyi yukle
-    csv_path = os.path.join(data_dir, f'{ticker}_processed_scaled.csv')
-    if not os.path.exists(csv_path):
-        print(f"Hata: {ticker} islenmis veri dosyasi bulunamadi. Once data_pipeline.py calistirin.")
+
+    from src.data.feature_store import FeatureStore
+    try:
+        store = FeatureStore(ticker)
+    except FileNotFoundError as e:
+        print(e)
         return
-        
-    df = pd.read_csv(csv_path, index_col=0)
-    
-    feature_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD',
-                    'MACD_Signal', 'BB_High', 'BB_Low', 'BB_Mid', 'SMA_20', 'EMA_50',
-                    'Log_Return', 'Return_Lag_5', 'Return_Lag_10', 'Return_Lag_20',
-                    'Daily_Return', 'Volatility_20', 'Momentum_10', 'Volume_Change',
-                    'ATR', 'ADX', 'Stoch_K', 'OBV_Change',
-                    'Price_To_SMA20', 'Price_To_EMA50']
-    # Sadece mevcut sutunlari kullan
-    feature_cols = [c for c in feature_cols if c in df.columns]
-    
-    # DUZELTME: Sliding-window hizalamasi ile feature hazirla
-    # Ensemble model ile ayni mantik kullanilmali
-    WINDOW_SIZE = 60
-    X_ml_base = df[feature_cols].values
-    
-    # DUZELTME (Hata #1 ve #7): Fallback hesaplamasi dongu disinda bir kere yapilir
-    if 'Direction' not in df.columns:
-        df_temp = create_classification_target(df)
-        direction_values = df_temp['Signal'].values
-    else:
-        direction_values = df['Direction'].values
-    
-    X_list = []
-    y_list = []
-    
-    for i in range(len(df) - WINDOW_SIZE):
-        X_list.append(X_ml_base[i + WINDOW_SIZE - 1])
-        signal = int(direction_values[i + WINDOW_SIZE - 1])
-        y_list.append(signal)
-    
-    X = np.array(X_list)
-    y = np.array(y_list)
-    
-    # Kronolojik train/test split (%80/%20)
-    train_size = int(len(X) * 0.8)
-    X_train, X_test = X[:train_size], X[train_size:]
-    y_train, y_test = y[:train_size], y[train_size:]
-    
-    print(f"Egitim: {X_train.shape[0]} ornek, Test: {X_test.shape[0]} ornek")
-    print(f"Sinif dagilimi (Train) - UP: {sum(y_train==1)}, DOWN: {sum(y_train==0)}")
-    
-    results = train_classification_models(X_train, y_train, X_test, y_test)
-    
+
+    print(f"\n{'=' * 60}")
+    print(f"  {ticker} ML Siniflandirma (Unified FeatureStore)")
+    print(f"{'=' * 60}")
+    print(f"  {store.summary()}")
+
+    # Unified split — tum modeller ayni bolumu kullanir
+    X_train, y_train = store.get_xgb_split("train")
+    X_val, y_val = store.get_xgb_split("val")
+    X_test, y_test = store.get_xgb_split("test")
+    feature_cols = store.feature_columns
+
+    print(f"\n  Train: {X_train.shape[0]} ornek, Val: {X_val.shape[0]} ornek, Test: {X_test.shape[0]} ornek")
+    print(f"  Sinif dagilimi (Train) - UP: {sum(y_train==1)}, DOWN: {sum(y_train==0)}")
+
+    # Egitim: train + val birlesik (RandomizedSearchCV icinde CV yapiliyor)
+    X_trainval = np.concatenate([X_train, X_val], axis=0)
+    y_trainval = np.concatenate([y_train, y_val], axis=0)
+
+    results = train_classification_models(X_trainval, y_trainval, X_test, y_test, feature_names=feature_cols)
+
     # Modelleri kaydet
     models_dir = os.path.join(base_dir, 'src', 'models', 'saved_models')
     os.makedirs(models_dir, exist_ok=True)
-    
+
     joblib.dump(results['rf']['model'], os.path.join(models_dir, f'{ticker}_rf_classifier.pkl'))
     joblib.dump(results['xgb']['model'], os.path.join(models_dir, f'{ticker}_xgb_classifier.pkl'))
     print(f"\n{ticker} modelleri '{models_dir}' dizinine kaydedildi.")
